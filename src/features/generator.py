@@ -88,15 +88,26 @@ class FeatureGenerator:
         data['hurst_exponent'] = self._calculate_hurst(data['close'], window=20)
 
         # GMM Hidden State (Régimen de mercado: 0=Rango, 1=Tendencia, 2=Volátil)
-        # Usamos rolling features para evitar Data Leakage global
-        regime_features = data[['realized_volatility', 'price_zscore_20']].dropna()
-        if len(regime_features) > 50:
-            gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
-            gmm.fit(regime_features)
-            states = gmm.predict(regime_features)
-            data.loc[regime_features.index, 'hmm_hidden_state'] = states
-        else:
-            data['hmm_hidden_state'] = 0
+        # FIX: ROLLING GMM PARA EVITAR LEAKAGE
+        regime_features = data[['realized_volatility', 'price_zscore_20']]
+        states = np.full(len(data), 0.0) # 0 por defecto
+        
+        window_size = 50
+        # Iteramos simulando el paso del tiempo para no ver el futuro
+        for i in range(window_size, len(data)):
+            # Entrenamos el GMM SOLO con el pasado (ventana móvil)
+            train_window = regime_features.iloc[i-window_size:i].dropna()
+            if len(train_window) > 30:
+                try:
+                    gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+                    gmm.fit(train_window)
+                    # Predecimos solo la vela actual
+                    current_row = regime_features.iloc[i:i+1]
+                    states[i] = gmm.predict(current_row)[0]
+                except:
+                    pass # Mantiene el estado 0 si el GMM no converge
+                    
+        data['hmm_hidden_state'] = states
 
         # 7. CROSS-TIMEFRAME (Simulado internamente para el ejemplo atómico)
         # En producción, esto recibe el merge de otros timeframes.

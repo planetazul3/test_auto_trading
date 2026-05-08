@@ -57,6 +57,9 @@ class XGBoostMetaLearner:
         
         # Para SHAP, necesitamos un modelo base entrenado en todo el dataset
         # ya que CalibratedClassifierCV crea un ensamble de modelos.
+        # NOTA DE AUDITORÍA: Los valores SHAP están explicando el modelo base 
+        # sin calibrar, no la probabilidad final calibrada. Este es un trade-off 
+        # estándar, ya que SHAP no soporta nativamente CalibratedClassifierCV.
         self.base_model.fit(X, y)
         self.explainer = shap.TreeExplainer(self.base_model)
         

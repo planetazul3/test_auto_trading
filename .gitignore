@@ -61,3 +61,4 @@ Thumbs.db
 .settings/
 # Audit
 project_audit_dump.txt
+*audit*
