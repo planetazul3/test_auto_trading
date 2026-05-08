@@ -59,3 +59,5 @@ Thumbs.db
 *.swo
 .project
 .settings/
+# Audit
+project_audit_dump.txt
