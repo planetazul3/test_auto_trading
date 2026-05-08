@@ -1,0 +1,120 @@
+{
+    "metadata": {
+        "version": "1.0",
+        "description": "Catálogo de features multi-timeframe con rangos esperados para validación de integridad."
+    },
+    "features": {
+        "trend": {
+            "EMA_9_21_50_200": {
+                "range": "[0, +inf)",
+                "type": "price_overlay",
+                "stationary": false
+            },
+            "Ichimoku": {
+                "range": "[0, +inf)",
+                "type": "price_overlay",
+                "stationary": false
+            }
+        },
+        "momentum": {
+            "RSI_7_14_21": {
+                "range": "[0, 100]",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "MACD": {
+                "range": "(-inf, +inf)",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "Stochastic_14_3": {
+                "range": "[0, 100]",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "Williams_R": {
+                "range": "[-100, 0]",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "CCI": {
+                "range": "[-300, 300]",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "MFI": {
+                "range": "[0, 100]",
+                "type": "oscillator",
+                "stationary": true
+            },
+            "ROC": {
+                "range": "(-inf, +inf)",
+                "type": "oscillator",
+                "stationary": true
+            }
+        },
+        "volatility": {
+            "ATR_7_14": {
+                "range": "[0, +inf)",
+                "type": "absolute",
+                "stationary": true
+            },
+            "Bollinger_Width": {
+                "range": "[0, +inf)",
+                "type": "relative",
+                "stationary": true
+            },
+            "Bollinger_PercentB": {
+                "range": "(-inf, +inf)",
+                "type": "relative",
+                "stationary": true
+            }
+        },
+        "volume": {
+            "OBV": {
+                "range": "(-inf, +inf)",
+                "type": "cumulative",
+                "stationary": false
+            },
+            "VWAP_Dev": {
+                "range": "(-inf, +inf)",
+                "type": "relative",
+                "stationary": true
+            },
+            "CMF": {
+                "range": "[-1, 1]",
+                "type": "oscillator",
+                "stationary": true
+            }
+        },
+        "microstructure": {
+            "Bid_Ask_Spread": {
+                "range": "[0, +inf)",
+                "type": "absolute",
+                "stationary": true
+            },
+            "Order_Book_Imbalance": {
+                "range": "[-1, 1]",
+                "type": "relative",
+                "stationary": true
+            }
+        },
+        "regime": {
+            "GMM_Hidden_State": {
+                "range": "[0, 1, 2]",
+                "type": "categorical",
+                "stationary": true
+            },
+            "Hurst_Exponent": {
+                "range": "[0, 1]",
+                "type": "relative",
+                "stationary": true
+            },
+            "Price_ZScore_20": {
+                "range": "[-5, 5]",
+                "type": "relative",
+                "stationary": true
+            }
+        }
+    }
+}
