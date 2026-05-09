@@ -18,44 +18,30 @@ warnings.filterwarnings("ignore", message=".*is_sparse.*")
 
 class RegimeAwareMetaLearner:
     """
-    Meta-Learner que toma las representaciones del TFT y emite probabilidades
-    calibradas de PUT/CALL. Incluye explicabilidad mediante SHAP.
-    Adaptado para ser sensible al régimen de mercado.
+    Meta-Learner que actúa como clasificador de regímenes de mercado.
+    Usa XGBoost con salida multi-clase (3 regímenes) para rutear señales
+    y ajustar el sizing dinámicamente.
     """
 
-    def __init__(self, calibration_method: str = 'isotonic', random_state: int = 42,
-                 n_splits: int = 3):
+    def __init__(self, random_state: int = 42, n_splits: int = 3):
         """
-        Parámetros
-        ----------
-        calibration_method : 'isotonic' o 'sigmoid'
-        random_state : semilla para reproducibilidad
-        n_splits : número de divisiones para TimeSeriesSplit
+        Configuración multi-clase para 3 regímenes:
+        0: Low Volatility / Mean Reversion
+        1: Trending / Momentum
+        2: High Volatility / Crash-Risk
         """
-        if calibration_method not in ['isotonic', 'sigmoid']:
-            raise ValueError("calibration_method debe ser 'isotonic' o 'sigmoid'")
-
-        self.calibration_method = calibration_method
         self.random_state = random_state
         self.n_splits = n_splits
 
-        self.base_model = xgb.XGBClassifier(
-            n_estimators=200,
+        self.model = xgb.XGBClassifier(
+            n_estimators=150,
             learning_rate=0.05,
-            max_depth=5,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            objective='binary:logistic',
-            eval_metric='logloss',
+            max_depth=4,
+            objective='multi:softprob',
+            num_class=3,
+            eval_metric='mlogloss',
             random_state=self.random_state,
             n_jobs=-1
-        )
-
-        # Calibración con validación temporal (sin barajar)
-        self.calibrated_model = CalibratedClassifierCV(
-            estimator=self.base_model,
-            method=self.calibration_method,
-            cv=TimeSeriesSplit(n_splits=n_splits)
         )
 
         self.is_fitted = False
@@ -63,37 +49,53 @@ class RegimeAwareMetaLearner:
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         """
-        Entrena el modelo XGBoost y ajusta la calibración de probabilidades
-        usando división temporal. Requiere que los datos estén ordenados
-        cronológicamente.
+        Entrena el clasificador de regímenes. 
+        'y' debe contener labels [0, 1, 2].
         """
-        if len(np.unique(y)) != 2:
-            raise ValueError("El target 'y' debe ser binario (0 para PUT, 1 para CALL).")
+        if len(np.unique(y)) > 3:
+            raise ValueError("El target 'y' debe tener máximo 3 clases de régimen.")
 
-        # Entrenamiento y calibración con TimeSeriesSplit
-        self.calibrated_model.fit(X, y)
-
-        # Para SHAP entrenamos una versión sin calibrar sobre todos los datos
-        self.base_model.fit(X, y)
+        self.model.fit(X, y)
         
         if SHAP_AVAILABLE:
-            self.explainer = shap.TreeExplainer(self.base_model)
+            self.explainer = shap.TreeExplainer(self.model)
         else:
             self.explainer = None
 
         self.is_fitted = True
 
-    def predict_proba(self, X: np.ndarray) -> dict:
+    def predict_regime_probs(self, X: np.ndarray) -> np.ndarray:
         """
-        Devuelve probabilidades calibradas para las clases 0 y 1.
+        Devuelve un vector de probabilidades [p0, p1, p2] para cada muestra.
         """
         if not self.is_fitted:
-            raise RuntimeError("El modelo debe ser entrenado con fit() antes de predecir.")
-        probs = self.calibrated_model.predict_proba(X)
-        return {
-            "p_put": probs[:, 0],
-            "p_call": probs[:, 1]
-        }
+            raise RuntimeError("El modelo debe ser entrenado antes de predecir.")
+        return self.model.predict_proba(X)
+
+    def get_regime_explanation(self, X: np.ndarray, feature_names: list = None) -> list:
+        """
+        Explica por qué se eligió un régimen específico.
+        """
+        if not self.is_fitted or not SHAP_AVAILABLE:
+            return []
+        
+        # Simplificado para brevedad: explicar la clase con mayor prob
+        probs = self.predict_regime_probs(X)
+        main_regime = np.argmax(probs, axis=1)
+        
+        shap_values = self.explainer.shap_values(X)
+        # shap_values es una lista para multi-clase
+        
+        explanations = []
+        for i in range(X.shape[0]):
+            regime_idx = main_regime[i]
+            sample_shap = np.abs(shap_values[regime_idx][i])
+            top_indices = np.argsort(sample_shap)[-3:][::-1]
+            if feature_names:
+                explanations.append([feature_names[idx] for idx in top_indices])
+            else:
+                explanations.append([f"f_{idx}" for idx in top_indices])
+        return explanations
 
     def get_shap_explanations(self, X: np.ndarray, feature_names: list = None,
                               top_n: int = 5) -> list:

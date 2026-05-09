@@ -57,14 +57,9 @@ class GatedResidualNetwork(nn.Module):
 
 class TFTFusionNode(nn.Module):
     """
-    Nodo de Fusión Temporal Avanzado para Motores de Señales Híbridos.
-    
-    Características de producción:
-    - Multi-Head Attention: Pondera dinámicamente la importancia de cada fuente (CNN, LSTM, etc.).
-    - Gated Residual Networks: Controla la complejidad de la fusión y suprime ruido.
-    - Variable Selection Gating: Gating individual por fuente antes de la atención.
-    - Compatibilidad con TorchScript: Optimizado para despliegue de baja latencia.
-    - Inicialización Robusta: Usa Xavier y LayerNorm para estabilidad numérica.
+    Nodo de Fusión Temporal Avanzado (TFT).
+    Aplica atención multi-head a través del tiempo con máscara causal estricta.
+    Fusa múltiples fuentes (CNN, LSTM) antes de la atención temporal.
     """
     def __init__(self, 
                  embedding_dim: int = 64, 
@@ -74,22 +69,18 @@ class TFTFusionNode(nn.Module):
                  output_dim: int = 64):
         super(TFTFusionNode, self).__init__()
         
-        if embedding_dim % num_heads != 0:
-            raise ValueError(f"embedding_dim ({embedding_dim}) debe ser divisible por num_heads ({num_heads}).")
-            
         self.embedding_dim = embedding_dim
         self.num_sources = num_sources
         self.num_heads = num_heads
         
-        # 1. Gating inicial por fuente (Variable Selection)
-        # Esto permite al modelo ignorar por completo una rama si se vuelve poco confiable.
-        self.source_gates = nn.ModuleList([
-            GatedResidualNetwork(embedding_dim, embedding_dim // 2, dropout=dropout)
-            for _ in range(num_sources)
-        ])
+        # 1. Variable Selection Gating (Fusión de fuentes por cada paso de tiempo)
+        self.source_projector = nn.Sequential(
+            nn.Linear(embedding_dim * num_sources, embedding_dim),
+            GatedLinearUnit(embedding_dim),
+            nn.LayerNorm(embedding_dim)
+        )
         
-        # 2. Multi-Head Attention (Self-Attention sobre las fuentes atendidas)
-        # Permite que las representaciones se "enriquezcan" entre sí.
+        # 2. Multi-Head Attention Temporal (Causal)
         self.multihead_attn = nn.MultiheadAttention(
             embed_dim=embedding_dim, 
             num_heads=num_heads, 
@@ -99,7 +90,6 @@ class TFTFusionNode(nn.Module):
         self.norm1 = nn.LayerNorm(embedding_dim)
         
         # 3. Post-Attention GRN
-        # Procesa la representación fusionada antes de la proyección final.
         self.grn = GatedResidualNetwork(
             input_dim=embedding_dim,
             hidden_dim=embedding_dim,
@@ -107,71 +97,53 @@ class TFTFusionNode(nn.Module):
         )
         self.norm2 = nn.LayerNorm(embedding_dim)
         
-        # 4. Proyección final a espacio latente de señal
+        # 4. Proyección final
         self.output_projection = nn.Sequential(
-            nn.Linear(embedding_dim * num_sources, 128),
-            nn.GELU(),
-            nn.LayerNorm(128),
-            nn.Dropout(dropout),
-            nn.Linear(128, output_dim),
+            nn.Linear(embedding_dim, output_dim),
             nn.LayerNorm(output_dim)
         )
         
         self._init_weights()
 
     def _init_weights(self):
-        """Inicialización de pesos Xavier para estabilidad en redes profundas."""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.bias, 0)
-                nn.init.constant_(m.weight, 1.0)
 
     def forward(self, source_embs: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass optimizado.
+        Forward pass con máscara causal.
         Args:
-            source_embs: Lista de Tensors de forma (batch_size, embedding_dim)
-        Returns:
-            enriched_representation: Tensor (batch_size, output_dim) listo para el Meta-Learner.
-            attn_weights: Pesos de atención (batch_size, num_sources, num_sources) para interpretabilidad.
+            source_embs: Lista de Tensors de forma (batch_size, seq_len, embedding_dim)
         """
-        if len(source_embs) != self.num_sources:
-            raise ValueError(f"Se esperaban {self.num_sources} fuentes, se recibieron {len(source_embs)}.")
-
-        # 1. Gating individual de fuentes (pre-atención)
-        # Nota: Usamos enumerate sobre ModuleList para compatibilidad total con TorchScript.
-        gated_embs: List[torch.Tensor] = []
-        for i, gate in enumerate(self.source_gates):
-            gated_embs.append(gate(source_embs[i]))
-            
-        # 2. Stack sources: (batch_size, num_sources, embedding_dim)
-        x = torch.stack(gated_embs, dim=1)
+        # 1. Concatenar y proyectar fuentes: (batch, seq, embedding_dim)
+        x = torch.cat(source_embs, dim=-1)
+        x = self.source_projector(x)
         
-        # 3. Multi-Head Attention & Add-Norm
-        attn_output, attn_weights_opt = self.multihead_attn(query=x, key=x, value=x)
+        # 2. Generar Máscara Causal (Upper Triangular)
+        seq_len = x.size(1)
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
         
-        # Manejo de Optional para TorchScript estricto
-        if attn_weights_opt is None:
-            attn_weights = torch.empty(0)
-        else:
-            attn_weights = attn_weights_opt
-            
+        # 3. Multi-Head Attention Temporal
+        attn_output, attn_weights_opt = self.multihead_attn(
+            query=x, key=x, value=x, 
+            attn_mask=mask
+        )
+        
+        attn_weights = attn_weights_opt if attn_weights_opt is not None else torch.empty(0)
+        
         x = self.norm1(x + attn_output)
         
-        # 4. Gated Residual Network & Add-Norm (Post-Attention)
-        grn_output = self.grn(x)
-        x = self.norm2(x + grn_output)
+        # 4. Post-Attention GRN
+        x = self.norm2(x + self.grn(x))
         
-        # 5. Flatten y Proyección Final
-        # Concatenamos las representaciones de cada fuente ya procesadas y atendidas.
-        x_flat = x.flatten(start_dim=1)
-        enriched_representation = self.output_projection(x_flat)
+        # 5. Proyección Final
+        enriched_representation = self.output_projection(x)
         
         return enriched_representation, attn_weights
+
 
 if __name__ == "__main__":
     print("Iniciando suite de validación: TFTFusionNode (Production-Ready)")

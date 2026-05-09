@@ -25,7 +25,7 @@ class CNN1DExtractor(nn.Module):
     Transforma una ventana temporal de features OHLCV+ en un embedding denso.
     Diseñado para ser robusto a diferentes longitudes de secuencia y evitar fugas de información.
     """
-    def __init__(self, num_features: int, sequence_length: int, embedding_dim: int = 64):
+    def __init__(self, num_features: int, sequence_length: int, embedding_dim: int = 64, return_sequence: bool = False):
         super(CNN1DExtractor, self).__init__()
         
         if num_features <= 0 or sequence_length <= 0:
@@ -34,36 +34,40 @@ class CNN1DExtractor(nn.Module):
         self.num_features = num_features
         self.sequence_length = sequence_length
         self.embedding_dim = embedding_dim
+        self.return_sequence = return_sequence
 
         # Bloque Convolucional 1: Detección de micro-patrones
-        # Usamos CausalConv1d para asegurar que el output en t solo dependa de [0, t]
         self.conv1 = CausalConv1d(in_channels=num_features, out_channels=64, kernel_size=3)
-        self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64) # GroupNorm suele ser más estable que LayerNorm en CNNs
+        self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
         self.act1 = nn.GELU()
         
-        # Bloque Convolucional 2: Agrupación de patrones con dilatación para mayor campo receptivo
+        # Bloque Convolucional 2: Agrupación de patrones
         self.conv2 = CausalConv1d(in_channels=64, out_channels=128, kernel_size=3, dilation=2)
         self.norm2 = nn.GroupNorm(num_groups=8, num_channels=128)
         self.act2 = nn.GELU()
 
-        # Adaptive Pooling: Permite que el extractor maneje cualquier sequence_length
-        # y produce una salida de tamaño fijo para la capa FC.
-        self.global_pool = nn.AdaptiveMaxPool1d(output_size=4) # Reducimos a 4 "puntos clave" temporales
-        
-        flattened_size = 128 * 4
-        
-        self.fc_projection = nn.Sequential(
-            nn.Linear(flattened_size, 256),
-            nn.GELU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(256, embedding_dim),
-            nn.LayerNorm(embedding_dim) # Normalizamos el embedding final
-        )
+        if not self.return_sequence:
+            # Adaptive Pooling: Colapsa a vector fijo
+            self.global_pool = nn.AdaptiveMaxPool1d(output_size=4)
+            flattened_size = 128 * 4
+            self.fc_projection = nn.Sequential(
+                nn.Linear(flattened_size, 256),
+                nn.GELU(),
+                nn.Dropout(p=0.3),
+                nn.Linear(256, embedding_dim),
+                nn.LayerNorm(embedding_dim)
+            )
+        else:
+            # Proyección por cada paso de tiempo
+            self.step_projection = nn.Sequential(
+                nn.Linear(128, embedding_dim),
+                nn.LayerNorm(embedding_dim)
+            )
         
         self._init_weights()
 
     def _init_weights(self):
-        """Inicialización de pesos Kaiming para capas con GELU."""
+        """Inicialización de pesos Kaiming."""
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -74,36 +78,28 @@ class CNN1DExtractor(nn.Module):
         """
         Forward pass.
         Args:
-            x: Tensor de forma (batch_size, sequence_length, num_features)
+            x: Tensor (batch, seq, features)
         Returns:
-            Tensor de forma (batch_size, embedding_dim)
+            Si return_sequence=False: (batch, embedding_dim)
+            Si return_sequence=True:  (batch, seq, embedding_dim)
         """
         if x.dim() != 3:
-            raise ValueError(f"Se esperaba un tensor 3D (batch, seq, features), se recibió {x.dim()}D")
+            raise ValueError(f"Se esperaba 3D, se recibió {x.dim()}D")
             
-        # PyTorch Conv1d espera (batch_size, channels, sequence_length)
-        x = x.transpose(1, 2)
+        x = x.transpose(1, 2) # (batch, features, seq)
         
-        # Bloque 1
-        x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.act1(x)
+        x = self.act1(self.norm1(self.conv1(x)))
+        x = self.act2(self.norm2(self.conv2(x)))
         
-        # Bloque 2
-        x = self.conv2(x)
-        x = self.norm2(x)
-        x = self.act2(x)
-        
-        # Global Pooling
-        x = self.global_pool(x)
-        
-        # Aplanar (Flatten)
-        x = x.flatten(start_dim=1)
-        
-        # Proyección final
-        embedding = self.fc_projection(x)
-        
-        return embedding
+        if not self.return_sequence:
+            x = self.global_pool(x)
+            x = x.flatten(start_dim=1)
+            return self.fc_projection(x)
+        else:
+            # x es (batch, 128, seq) -> volver a (batch, seq, 128)
+            x = x.transpose(1, 2)
+            return self.step_projection(x)
+
 
 if __name__ == "__main__":
     print("Inicializando CNN-1D Extractor...")

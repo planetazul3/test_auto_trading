@@ -29,12 +29,6 @@ class BiLSTMEncoder(nn.Module):
     Codificador Temporal Robusto (LSTM/GRU).
     Captura dependencias temporales en la ventana de features y las comprime
     en un embedding denso calibrado para el motor de señales.
-    
-    Mejoras de producción:
-    - Inicialización Ortogonal para evitar gradientes desvanecientes.
-    - Pooling por Atención en lugar de solo usar el último estado oculto.
-    - Normalización por Capas (LayerNorm) para estabilidad numérica.
-    - Soporte para modo Causal (Unidireccional) por defecto.
     """
     def __init__(self, 
                  input_size: int, 
@@ -43,17 +37,16 @@ class BiLSTMEncoder(nn.Module):
                  dropout: float = 0.3, 
                  embedding_dim: int = 64,
                  bidirectional: bool = False,
-                 rnn_type: str = "lstm"):
+                 rnn_type: str = "lstm",
+                 return_sequence: bool = False):
         super(BiLSTMEncoder, self).__init__()
         
-        if input_size <= 0 or hidden_size <= 0:
-            raise ValueError("input_size y hidden_size deben ser mayores a 0.")
-
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.embedding_dim = embedding_dim
         self.bidirectional = bidirectional
+        self.return_sequence = return_sequence
 
         # Selección de celda recurrente
         rnn_class = nn.LSTM if rnn_type.lower() == "lstm" else nn.GRU
@@ -69,30 +62,30 @@ class BiLSTMEncoder(nn.Module):
 
         # Dimensión de salida del RNN
         rnn_out_size = hidden_size * (2 if bidirectional else 1)
-        
-        # Capa de normalización post-RNN
         self.ln_rnn = nn.LayerNorm(rnn_out_size)
         
-        # Mecanismo de Atención Temporal
-        self.attention = AttentionPooling(rnn_out_size)
-
-        # Proyección final: MLP Robusto con GELU y LayerNorm
-        self.fc_projection = nn.Sequential(
-            nn.Linear(rnn_out_size, rnn_out_size * 2),
-            nn.GELU(),
-            nn.LayerNorm(rnn_out_size * 2),
-            nn.Dropout(p=dropout),
-            nn.Linear(rnn_out_size * 2, embedding_dim),
-            nn.LayerNorm(embedding_dim)
-        )
+        if not self.return_sequence:
+            # Mecanismo de Atención Temporal para colapsar
+            self.attention = AttentionPooling(rnn_out_size)
+            self.fc_projection = nn.Sequential(
+                nn.Linear(rnn_out_size, rnn_out_size * 2),
+                nn.GELU(),
+                nn.LayerNorm(rnn_out_size * 2),
+                nn.Dropout(p=dropout),
+                nn.Linear(rnn_out_size * 2, embedding_dim),
+                nn.LayerNorm(embedding_dim)
+            )
+        else:
+            # Proyección por paso de tiempo
+            self.step_projection = nn.Sequential(
+                nn.Linear(rnn_out_size, embedding_dim),
+                nn.LayerNorm(embedding_dim)
+            )
         
         self._init_weights()
 
     def _init_weights(self):
-        """
-        Inicialización robusta para producción.
-        Usa Orthogonal para las recurrencias y Xavier para las proyecciones.
-        """
+        """Inicialización robusta."""
         for name, param in self.named_parameters():
             if 'weight_ih' in name:
                 nn.init.xavier_uniform_(param.data)
@@ -100,7 +93,6 @@ class BiLSTMEncoder(nn.Module):
                 nn.init.orthogonal_(param.data)
             elif 'bias' in name:
                 nn.init.constant_(param.data, 0)
-                # Opcional: forget gate bias = 1 para LSTMs para ayudar con dependencias largas
                 if 'bias_ih' in name and isinstance(self.rnn, nn.LSTM):
                     n = param.size(0)
                     param.data[n//4:n//2].fill_(1.0)
@@ -109,27 +101,22 @@ class BiLSTMEncoder(nn.Module):
         """
         Forward pass del codificador.
         Args:
-            x: Tensor de forma (batch_size, sequence_length, input_size)
+            x: Tensor (batch, seq, features)
         Returns:
-            embedding: Tensor de forma (batch_size, embedding_dim)
+            embedding: (batch, dim) o (batch, seq, dim)
         """
         if x.dim() != 3:
-            raise ValueError(f"Se esperaba un tensor 3D (batch, seq, features), se recibió {x.dim()}D")
+            raise ValueError(f"Se esperaba 3D, se recibió {x.dim()}D")
 
-        # Salida del RNN: (batch, seq, hidden * num_directions)
         out, _ = self.rnn(x)
-        
-        # Aplicamos LayerNorm a la secuencia completa
         out = self.ln_rnn(out)
         
-        # Colapsamos la dimensión temporal mediante atención
-        # Esto permite capturar eventos importantes en cualquier punto de la ventana
-        context_vector = self.attention(out)
+        if not self.return_sequence:
+            context_vector = self.attention(out)
+            return self.fc_projection(context_vector)
+        else:
+            return self.step_projection(out)
 
-        # Proyectamos al espacio de embedding final
-        embedding = self.fc_projection(context_vector)
-
-        return embedding
 
 if __name__ == "__main__":
     print("Inicializando Advanced Temporal Encoder...")
