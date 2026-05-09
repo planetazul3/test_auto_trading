@@ -21,7 +21,6 @@ from sklearn.model_selection import TimeSeriesSplit
 from src.features.generator import FeatureGenerator  # debe incluir safe_causal_zscore
 from src.models.hybrid_tft import HybridCNNLSTMTFT      # modelo causal del blueprint
 from src.models.calibration import LowLatencyRollingIsotonicCalibrator
-from src.models.meta_learner import RegimeAwareMetaLearner
 from src.utils.integrity import temporal_integrity_check  # CI/CD check de look-ahead
 
 warnings.filterwarnings("ignore")
@@ -220,14 +219,11 @@ def main():
     print(f"  Max Drawdown (umbrales 0.72/0.28): {max_dd:.2%}")
     print(f"  Final Equity: {equity_curve[-1]:.4f}")
 
-    # ---- 7. Meta‑aprendizaje adaptativo por régimen (opcional pero integrado) ----
-    print("[6/6] Evaluando régimen de mercado para enrutamiento...")
-    # Aquí se podrían calcular los 5 features de régimen (ATR ratio, dist 200SMA, etc.)
-    # Para ilustrar, usamos un meta‑learner pre‑entrenado con datos históricos.
-    # En producción se entrenaría con etiquetas HMM.
-    regime_learner = RegimeAwareMetaLearner()  # modelo XGBoost multi:softprob
-    # Simulamos que ya está entrenado (en la práctica se cargaría un modelo serializado)
-    # ... se omiten los features de régimen para este demo
+    # ---- 7. Meta‑aprendizaje adaptativo por régimen ----
+    # El enrutamiento por régimen vive en src.models.ensemble.HybridSignalEngine,
+    # que carga un RegimeAwareMetaLearner ya entrenado. Este pipeline no lo
+    # ejercita end-to-end para mantener la demo determinista; ver ensemble.py.
+    print("[6/6] (Skip) Enrutamiento por régimen — ver src.models.ensemble.")
 
     # Registro en MLflow
     if MLFLOW_AVAILABLE:
