@@ -86,7 +86,7 @@ build-backend = "hatchling.build"
 
 # Configuración del layout de fuente (estándar src)
 [tool.hatch.build.targets.wheel]
-packages = ["src/ml_signal_engine"]
+packages = ["src/features", "src/models", "src/utils"]
 
 [tool.hatch.build]
 include = [
