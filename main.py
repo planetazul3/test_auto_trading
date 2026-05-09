@@ -44,21 +44,26 @@ REGIME_WINDOW = 500            # muestras para reentrenar meta‑learner cada N 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
-# Secuenciación temporal optimizada (O(1) stride-based)
+# Secuenciación temporal eficiente (Memory-Mapped or Slicing)
 # ---------------------------------------------------------------------------
-def create_sequences(features: np.ndarray, target: np.ndarray, seq_len: int):
+class TimeSeriesDataset(torch.utils.data.Dataset):
     """
-    Crea secuencias 3D (batch, seq_len, features) usando vistas de numpy (vectorizado).
-    Mucho más rápido que los bucles explícitos para datasets grandes.
+    Dataset eficiente que evita copias masivas en RAM al no pre-computar
+    la matriz 3D. Genera las ventanas al vuelo (on-the-fly).
     """
-    from numpy.lib.stride_tricks import sliding_window_view
-    
-    # sliding_window_view crea una vista (view), no una copia. Muy eficiente.
-    # Obtenemos L - seq_len + 1 ventanas. Queremos L - seq_len para coincidir con el target.
-    X = sliding_window_view(features, (seq_len, features.shape[1])).squeeze(1)[:-1]
-    y = target[seq_len:]
-    
-    return torch.tensor(X.copy(), dtype=torch.float32), y
+    def __init__(self, features: np.ndarray, target: np.ndarray, seq_len: int):
+        self.features = torch.tensor(features, dtype=torch.float32)
+        self.target = torch.tensor(target, dtype=torch.float32)
+        self.seq_len = seq_len
+
+    def __len__(self):
+        return len(self.features) - self.seq_len
+
+    def __getitem__(self, idx):
+        # Slice de (seq_len, num_features)
+        x = self.features[idx : idx + self.seq_len]
+        y = self.target[idx + self.seq_len]
+        return x, y
 
 # ---------------------------------------------------------------------------
 # Walk‑Forward con calibración isotónica y régimen adaptativo
@@ -124,11 +129,15 @@ def main():
     returns_test = test_df["future_return"].values
 
     num_features = features_train.shape[1]
-    X_train, y_train = create_sequences(features_train, target_train, SEQ_LENGTH)
-    X_test, y_test = create_sequences(features_test, target_test, SEQ_LENGTH)
+    
+    # Usamos el Dataset eficiente
+    train_dataset = TimeSeriesDataset(features_train, target_train, SEQ_LENGTH)
+    test_dataset = TimeSeriesDataset(features_test, target_test, SEQ_LENGTH)
+    
+    # Para evaluación necesitamos el vector de retornos alineado
     test_returns = returns_test[SEQ_LENGTH:]
 
-    print(f"  Train sequences: {X_train.shape}, Test sequences: {X_test.shape}")
+    print(f"  Train samples: {len(train_dataset)}, Test samples: {len(test_dataset)}")
 
     # ---- 5. Modelo híbrido causal (CNN‑LSTM + TFT) ----
     print("[4/6] Instanciando modelo híbrido causal CNN‑LSTM‑TFT...")
@@ -146,52 +155,55 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     criterion = torch.nn.BCEWithLogitsLoss()
     
-    dataset = torch.utils.data.TensorDataset(X_train.to(DEVICE),
-                                             torch.tensor(y_train, dtype=torch.float32).to(DEVICE))
-    
-    # Mejoramos DataLoader para producción (pin_memory si hay CUDA)
+    # DataLoader con el nuevo dataset
     loader = torch.utils.data.DataLoader(
-        dataset, 
+        train_dataset, 
         batch_size=64, 
         shuffle=True, 
         pin_memory=(DEVICE.type == 'cuda'),
-        num_workers=0 # Aumentar si se usa un dataset en disco muy pesado
+        num_workers=0
     )
 
     for epoch in range(EPOCHS):
         total_loss = 0.0
         for xb, yb in loader:
             optimizer.zero_grad()
-            # El modelo devuelve predicciones crudas y pesos del VSN
-            preds, _ = model(xb)  # preds: (batch, 1) → squeeze
-            loss = criterion(preds.squeeze(), yb)
+            preds, _ = model(xb.to(DEVICE))
+            loss = criterion(preds.squeeze(), yb.to(DEVICE))
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * xb.size(0)
-        print(f"  Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss/len(dataset):.4f}")
+        print(f"  Epoch {epoch+1}/{EPOCHS} - Loss: {total_loss/len(train_dataset):.4f}")
 
     # Obtener scores crudos (logits) sobre test
     model.eval()
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False)
+    raw_margins = []
     with torch.no_grad():
-        raw_logits, _ = model(X_test.to(DEVICE))
-        raw_margins = raw_logits.squeeze().cpu().numpy()  # para calibración
+        for xb, _ in test_loader:
+            logits, _ = model(xb.to(DEVICE))
+            raw_margins.append(logits.squeeze().cpu().numpy())
+    
+    raw_margins = np.concatenate(raw_margins)
+    y_test_seq = target_test[SEQ_LENGTH:]  # etiquetas alineadas con las ventanas
+
 
     # ---- 6. Calibración isotónica (post hoc) ----
     print("[5/6] Calibrando probabilidades con regresión isotónica rodante...")
     calibrator = LowLatencyRollingIsotonicCalibrator(window_size=CALIBRATION_WINDOW)
-    # Alimentar con los márgenes crudos y los resultados reales (train reciente)
+    # Alimentar con los márgenes crudos y los resultados reales
     # En producción se llena asincrónicamente; aquí lo hacemos secuencial
-    for margin, true_label in zip(raw_logits.cpu().numpy(), y_test):
+    for margin, true_label in zip(raw_margins, y_test_seq):
         calibrator.add_observation(margin, true_label)
     calibrator.update_calibration_curve()
     calibrated_probs = np.array([calibrator.calibrate_signal(m) for m in raw_margins])
 
     # Métricas de rendimiento calibrado
     y_pred = (calibrated_probs > 0.5).astype(int)
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    auc = roc_auc_score(y_test, calibrated_probs)
-    brier = brier_score_loss(y_test, calibrated_probs)
+    acc = accuracy_score(y_test_seq, y_pred)
+    f1 = f1_score(y_test_seq, y_pred)
+    auc = roc_auc_score(y_test_seq, calibrated_probs)
+    brier = brier_score_loss(y_test_seq, calibrated_probs)
 
     # Señal de trading con umbrales de alta confianza
     signals = np.where(calibrated_probs > 0.72, 1,
