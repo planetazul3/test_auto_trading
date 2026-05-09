@@ -138,7 +138,7 @@ if __name__ == "__main__":
     y_train, y_test = y_synthetic[:split_idx], y_synthetic[split_idx:]
 
     try:
-        meta_learner = XGBoostMetaLearner(calibration_method='isotonic', n_splits=3)
+        meta_learner = RegimeAwareMetaLearner(calibration_method='isotonic', n_splits=3)
         print(f"Entrenando con {len(X_train)} muestras (orden cronológico)...")
         meta_learner.fit(X_train, y_train)
 
