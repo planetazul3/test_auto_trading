@@ -147,53 +147,50 @@ class TFTFusionNode(nn.Module):
 
 if __name__ == "__main__":
     print("Iniciando suite de validación: TFTFusionNode (Production-Ready)")
-    
+
     # Parámetros de prueba consistentes con el HybridSignalEngine
     BATCH_SIZE = 16
+    SEQ_LEN = 60
     EMB_DIM = 64
     NUM_HEADS = 4
     OUTPUT_DIM = 64
-    
+
     torch.manual_seed(42)
-    
-    # Prueba con 2 fuentes (CNN, LSTM)
+
+    # Prueba con 2 fuentes (CNN, LSTM): tensores 3D (batch, seq, emb)
     print("\n--- TEST 1: Dual Source Integration (CNN + LSTM) ---")
     model_2 = TFTFusionNode(num_sources=2, embedding_dim=EMB_DIM, output_dim=OUTPUT_DIM)
     model_2.eval()
-    
-    s1 = torch.randn(BATCH_SIZE, EMB_DIM)
-    s2 = torch.randn(BATCH_SIZE, EMB_DIM)
-    
+
+    s1 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
+    s2 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
+
     with torch.no_grad():
         out_2, attn_2 = model_2([s1, s2])
-    
-    print(f"Output shape: {out_2.shape} (Esperado: {BATCH_SIZE, OUTPUT_DIM})")
-    print(f"Attn weights shape: {attn_2.shape} (Esperado: {BATCH_SIZE, 2, 2})")
-    assert out_2.shape == (BATCH_SIZE, OUTPUT_DIM)
-    assert not torch.isnan(out_2).any(), "NaNs detectados en la salida"
 
-    # Prueba de interpretabilidad
-    print(f"Pesos de atención (ejemplo batch 0):\n{attn_2[0].numpy()}")
+    print(f"Output shape: {tuple(out_2.shape)} (Esperado: {(BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)})")
+    print(f"Attn weights shape: {tuple(attn_2.shape)} (Esperado: {(BATCH_SIZE, SEQ_LEN, SEQ_LEN)})")
+    assert out_2.shape == (BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)
+    assert not torch.isnan(out_2).any(), "NaNs detectados en la salida"
 
     # Prueba con 3 fuentes (Futuras expansiones: Sentiment, Macro, Orderbook)
     print("\n--- TEST 2: Multi-Source Flexibility (3 fuentes) ---")
     model_3 = TFTFusionNode(num_sources=3, embedding_dim=EMB_DIM, output_dim=OUTPUT_DIM)
     model_3.eval()
-    s3 = torch.randn(BATCH_SIZE, EMB_DIM)
-    
+    s3 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
+
     with torch.no_grad():
-        out_3, attn_3 = model_3([s1, s2, s3])
-    print(f"Output shape (3 sources): {out_3.shape}")
-    assert out_3.shape == (BATCH_SIZE, OUTPUT_DIM)
+        out_3, _attn_3 = model_3([s1, s2, s3])
+    print(f"Output shape (3 sources): {tuple(out_3.shape)}")
+    assert out_3.shape == (BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)
 
     # Validación de Despliegue (TorchScript)
     print("\n--- TEST 3: Production Deployment (TorchScript JIT) ---")
     try:
-        model_2.eval()
         scripted = torch.jit.script(model_2)
         with torch.no_grad():
             s_out, _ = scripted([s1, s2])
-        
+
         # Verificamos que la salida sea idéntica (dentro de tolerancia numérica)
         assert torch.allclose(out_2, s_out, atol=1e-5)
         print("[OK] Modelo compatible con JIT y verificado para producción.")
