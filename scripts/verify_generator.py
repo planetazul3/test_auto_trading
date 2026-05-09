@@ -1,12 +1,7 @@
-import sys
-import os
 import pandas as pd
 import numpy as np
 
-# Añadir src al path
-sys.path.append(os.path.join(os.getcwd(), 'src'))
-
-from features.generator import FeatureGenerator
+from src.features.generator import FeatureGenerator
 
 def verify_generator():
     print("Iniciando verificación manual del Feature Generator...")
