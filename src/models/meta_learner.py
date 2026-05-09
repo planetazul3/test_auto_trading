@@ -1,11 +1,8 @@
 """
-Meta-Learner XGBoost con calibración temporal.
-Versión 2.0: usa TimeSeriesSplit para evitar fuga de futuro en la calibración.
+Meta-Learner XGBoost para clasificación de regímenes de mercado.
 """
 import numpy as np
 import xgboost as xgb
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import TimeSeriesSplit
 try:
     import shap
     SHAP_AVAILABLE = True
@@ -126,38 +123,42 @@ class RegimeAwareMetaLearner:
 
 
 if __name__ == "__main__":
-    print("Inicializando Meta-Learner XGBoost con Calibración Temporal...")
+    print("Inicializando Meta-Learner XGBoost (clasificador de regímenes)...")
     np.random.seed(42)
     NUM_SAMPLES = 1000
     OUTPUT_DIM = 64
+    NUM_REGIMES = 3
 
     X_synthetic = np.random.randn(NUM_SAMPLES, OUTPUT_DIM)
-    y_synthetic = (X_synthetic[:, 0] + X_synthetic[:, 1] * 0.5 + np.random.randn(NUM_SAMPLES) > 0).astype(int)
+    # Etiquetas multi-clase [0, 1, 2] = (Low Vol, Trending, High Vol)
+    y_synthetic = np.random.randint(0, NUM_REGIMES, size=NUM_SAMPLES)
 
-    # Divisiones temporales manuales para prueba (respetando orden)
+    # Divisiones temporales manuales (respetando orden cronológico)
     split_idx = int(0.8 * NUM_SAMPLES)
     X_train, X_test = X_synthetic[:split_idx], X_synthetic[split_idx:]
-    y_train, y_test = y_synthetic[:split_idx], y_synthetic[split_idx:]
+    y_train, _y_test = y_synthetic[:split_idx], y_synthetic[split_idx:]
 
     try:
-        meta_learner = RegimeAwareMetaLearner(calibration_method='isotonic', n_splits=3)
+        meta_learner = RegimeAwareMetaLearner(n_splits=3)
         print(f"Entrenando con {len(X_train)} muestras (orden cronológico)...")
         meta_learner.fit(X_train, y_train)
 
-        print("Generando predicciones calibradas...")
-        probs = meta_learner.predict_proba(X_test)
+        print("Generando probabilidades por régimen...")
+        regime_probs = meta_learner.predict_regime_probs(X_test)
 
         feature_names = [f"tft_emb_{i}" for i in range(OUTPUT_DIM)]
         top_features = meta_learner.get_shap_explanations(X_test, feature_names=feature_names, top_n=5)
 
-        print("\n--- REPORTE DE SEÑAL (Muestra 0) ---")
-        print(f"Probabilidad PUT : {probs['p_put'][0]:.4f}")
-        print(f"Probabilidad CALL: {probs['p_call'][0]:.4f}")
+        regime_labels = ["LOW_VOL", "TRENDING", "HIGH_VOL"]
+        print("\n--- REPORTE DE RÉGIMEN (Muestra 0) ---")
+        for idx, label in enumerate(regime_labels):
+            print(f"  P({label}): {regime_probs[0, idx]:.4f}")
         print(f"Top 5 Features (SHAP): {top_features[0]}")
 
-        assert np.allclose(probs['p_put'] + probs['p_call'], 1.0)
-        assert np.all((probs['p_call'] >= 0) & (probs['p_call'] <= 1))
-        print("\n[OK] Meta-Learner con validación temporal ejecutado correctamente.")
+        assert regime_probs.shape == (len(X_test), NUM_REGIMES)
+        assert np.allclose(regime_probs.sum(axis=1), 1.0, atol=1e-6)
+        assert np.all((regime_probs >= 0) & (regime_probs <= 1))
+        print("\n[OK] Meta-Learner ejecutado correctamente.")
 
     except Exception as e:
         print(f"\n[ERROR] {e}")
