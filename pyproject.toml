@@ -1,39 +1,126 @@
 [project]
 name = "ml-signal-engine"
 version = "0.1.0"
-description = "Sistema híbrido ML para señales PUT/CALL con arquitectura Ensemble (CNN, BiLSTM, TFT, XGBoost)"
-authors = [{ name = "AI Quant", email = "quant@example.com" }]
+description = "Producción híbrida de señales PUT/CALL: ensemble CNN‑LSTM + TFT + XGBoost con calibración isotónica de baja latencia y enrutamiento adaptativo por régimen"
+authors = [
+    { name = "AI Quant", email = "quant@example.com" }
+]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies =[
-    "torch>=2.2.1",
-    "scikit-learn>=1.4.1",
-    "xgboost>=2.0.3",
-    "lightgbm>=4.3.0",
-    "pandas-ta>=0.3.14b0",
-    "TA-Lib>=0.4.28",
-    "shap>=0.45.0",
-    "mlflow>=2.11.1",
-    "optuna>=3.5.0",
-    "pytorch-forecasting>=1.0.0",
-    "numpy>=1.26.4",
-    "pandas>=2.2.1",
-    "scipy>=1.12.0",
-    "pytest>=8.1.1",
-    "matplotlib>=3.8.3",
-    "pydantic>=2.6.3"
+license = { text = "Proprietary" }
+keywords = [
+    "quantitative-trading",
+    "machine-learning",
+    "temporal-fusion-transformer",
+    "probability-calibration",
+    "walk-forward-backtest",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Dependencias estrictas para el motor de señales en producción
+dependencies = [
+    # Deep Learning & series temporales
+    "torch>=2.2.1,<2.5.0",
+    "pytorch-forecasting>=1.0.0,<1.1.0",
+    # Ensamble de árboles
+    "xgboost>=2.0.3,<2.1.0",
+    "lightgbm>=4.3.0,<4.4.0",
+    # Feature engineering financiero
+    "pandas-ta>=0.3.14b0,<0.4.0",
+    "TA-Lib>=0.4.28,<0.5.0",   # Requiere instalación binaria nativa
+    # Calibración de probabilidades (baja latencia)
+    "numba>=0.59.0,<0.60.0",
+    "scikit-learn>=1.4.1,<1.5.0",
+    # Infraestructura de datos & optimización
+    "numpy>=1.26.4,<1.27.0",
+    "pandas>=2.2.1,<2.3.0",
+    "scipy>=1.12.0,<1.13.0",
+    # Serialización / tipado robusto
+    "pydantic>=2.6.3,<2.7.0",
+]
+
+[project.urls]
+Repository = "https://github.com/quantforge/ml-signal-engine"
+Documentation = "https://quantforge.github.io/ml-signal-engine"
+
+[project.optional-dependencies]
+# Herramientas de análisis/interpretabilidad (no se incluyen en runtime de producción)
+analysis = [
+    "shap>=0.45.0,<0.46.0",
+    "matplotlib>=3.8.3,<3.9.0",
+    "seaborn>=0.13.0",
+    "plotly>=5.18.0",
+]
+
+# Puente MetaTrader 5 / ZeroMQ para despliegue de baja latencia
+bridge = [
+    "pyzmq>=25.1.2,<26.0.0",
+    "MetaTrader5>=5.0.45",
+]
+
+# Seguimiento de experimentos (MLflow)
+experiment = [
+    "mlflow>=2.11.1,<2.12.0",
+]
+
+# Desarrollo y CI/CD
+dev = [
+    "pytest>=8.1.1,<8.2.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.12.0,<24.0.0",
+    "ruff==0.1.15",
+    "mypy>=1.8.0,<1.9.0",
+    "pre-commit>=3.6.0",
+    "pip-tools>=7.3.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Configuración del layout de fuente (estándar src)
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/ml_signal_engine"]
 
+[tool.hatch.build]
+include = [
+    "src/**/*.py",
+    "README.md",
+    "LICENSE",
+]
+
+# Configuración de PyTest (para la suite de integridad temporal)
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra -q"
-testpaths = [
-    "tests",
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--tb=short",
+    "--disable-warnings"
 ]
+testpaths = ["tests"]
+markers = [
+    "slow: tests that require large datasets (deselect with '-m \"not slow\"')",
+    "latency: pruebas de rendimiento de latencia sub‑milisegundo",
+]
+
+# Configuración de herramientas de calidad (CI/CD)
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.black]
+line-length = 100
