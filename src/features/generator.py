@@ -5,10 +5,51 @@ Versión 2.0: sin data leakage por backward fill, ffill estricto para respear or
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
+from numba import njit
 from sklearn.mixture import GaussianMixture
 import warnings
 
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+
+
+@njit
+def _fast_hurst(x: np.ndarray) -> float:
+    """Calcula el Hurst exponent de una serie pequeña usando regresión lineal sobre lags."""
+    if len(x) < 10:
+        return 0.5
+    lags = np.arange(2, 10)
+    log_lags = np.log(lags)
+    log_tau = np.empty(len(lags))
+
+    for i in range(len(lags)):
+        lag = lags[i]
+        diff = x[lag:] - x[:-lag]
+        std_val = np.std(diff)
+        log_tau[i] = np.log(np.sqrt(std_val))
+
+    # Regresión lineal simple: y = mx + c
+    n = len(log_lags)
+    sum_x = np.sum(log_lags)
+    sum_y = np.sum(log_tau)
+    sum_xx = np.sum(log_lags**2)
+    sum_xy = np.sum(log_lags * log_tau)
+
+    denom = (n * sum_xx - sum_x**2)
+    if denom == 0:
+        return 0.5
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    return slope * 2.0
+
+
+@njit
+def _rolling_hurst_numba(values: np.ndarray, window: int) -> np.ndarray:
+    """Aplica _fast_hurst en una ventana móvil de forma eficiente."""
+    n = len(values)
+    res = np.empty(n)
+    res[:] = np.nan
+    for i in range(window - 1, n):
+        res[i] = _fast_hurst(values[i - window + 1 : i + 1])
+    return res
 
 
 class FeatureGenerator:
@@ -52,15 +93,9 @@ class FeatureGenerator:
         return (series - rolling_mean) / rolling_std
 
     def _calculate_hurst(self, series: pd.Series, window: int = 20) -> pd.Series:
-        """Hurst exponent en ventana móvil para detectar regímenes."""
-        def hurst(x):
-            if len(x) < 10:
-                return 0.5
-            lags = range(2, 10)
-            tau = [np.sqrt(np.std(np.subtract(x[lag:], x[:-lag]))) for lag in lags]
-            poly = np.polyfit(np.log(lags), np.log(tau), 1)
-            return poly[0] * 2.0
-        return series.rolling(window=window).apply(hurst, raw=True)
+        """Hurst exponent en ventana móvil para detectar regímenes mediante Numba."""
+        hurst_values = _rolling_hurst_numba(series.values, window)
+        return pd.Series(hurst_values, index=series.index)
 
     def generate_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -69,86 +104,108 @@ class FeatureGenerator:
         """
         self._validate_data(df)
         data = df.copy()
+        
+        # Diccionario para coleccionar nuevas columnas y evitar fragmentación
+        f = {}
 
         # 1. TENDENCIA
-        data.ta.ema(length=9, append=True)
-        data.ta.ema(length=21, append=True)
-        data.ta.ema(length=50, append=True)
-        data.ta.ema(length=200, append=True)
-        data.ta.sma(length=20, append=True)
-        data.ta.dema(length=20, append=True)
-        data.ta.tema(length=20, append=True)
-        data.ta.ichimoku(append=True)
+        f['EMA_9'] = data.ta.ema(length=9)
+        f['EMA_21'] = data.ta.ema(length=21)
+        f['EMA_50'] = data.ta.ema(length=50)
+        f['EMA_200'] = data.ta.ema(length=200)
+        f['SMA_20'] = data.ta.sma(length=20)
+        f['DEMA_20'] = data.ta.dema(length=20)
+        f['TEMA_20'] = data.ta.tema(length=20)
+        
+        ichi = data.ta.ichimoku()
+        if ichi is not None:
+            f['ICHIMOKU'] = ichi[0]
+            f['ICHIMOKU_SPAN'] = ichi[1]
 
         # 2. MOMENTUM
-        data.ta.rsi(length=7, append=True)
-        data.ta.rsi(length=14, append=True)
-        data.ta.rsi(length=21, append=True)
-        data.ta.macd(fast=12, slow=26, signal=9, append=True)
-        data.ta.stoch(k=14, d=3, append=True)
-        data.ta.willr(length=14, append=True)
-        data.ta.cci(length=14, append=True)
-        data.ta.mfi(length=14, append=True)
-        data.ta.roc(length=10, append=True)
+        f['RSI_7'] = data.ta.rsi(length=7)
+        f['RSI_14'] = data.ta.rsi(length=14)
+        f['RSI_21'] = data.ta.rsi(length=21)
+        f['MACD'] = data.ta.macd(fast=12, slow=26, signal=9)
+        f['STOCH'] = data.ta.stoch(k=14, d=3)
+        f['WILLR'] = data.ta.willr(length=14)
+        f['CCI'] = data.ta.cci(length=14)
+        f['MFI'] = data.ta.mfi(length=14)
+        f['ROC'] = data.ta.roc(length=10)
 
         # 3. VOLATILIDAD
-        data.ta.atr(length=7, append=True)
-        data.ta.atr(length=14, append=True)
-        data.ta.bbands(length=20, std=2, append=True)
-        data.ta.kc(length=20, append=True)
-        data.ta.donchian(lower_length=20, upper_length=20, append=True)
+        f['ATR_7'] = data.ta.atr(length=7)
+        f['ATR_14'] = data.ta.atr(length=14)
+        f['BBANDS'] = data.ta.bbands(length=20, std=2)
+        f['KC'] = data.ta.kc(length=20)
+        f['DONCHIAN'] = data.ta.donchian(lower_length=20, upper_length=20)
 
         # 4. VOLUMEN
-        data.ta.obv(append=True)
-        data.ta.vwap(append=True)
-        data.ta.cmf(append=True)
+        f['OBV'] = data.ta.obv()
+        f['VWAP'] = data.ta.vwap()
+        f['CMF'] = data.ta.cmf()
+        
         if self.use_causal_zscore:
-            data['volume_zscore'] = self.safe_causal_zscore(data['volume'], self.window)
+            f['volume_zscore'] = self.safe_causal_zscore(data['volume'], self.window).rename('volume_zscore')
         else:
-            data['volume_zscore'] = (data['volume'] - data['volume'].rolling(20).mean()) / data['volume'].rolling(20).std()
-        data['volume_ratio'] = data['volume'] / data['volume'].rolling(20).mean()
+            vol_roll = data['volume'].rolling(20)
+            f['volume_zscore'] = ((data['volume'] - vol_roll.mean()) / vol_roll.std()).rename('volume_zscore')
+        
+        f['volume_ratio'] = (data['volume'] / data['volume'].rolling(20).mean()).rename('volume_ratio')
 
         # 5. MICROESTRUCTURA
-        data['bid_ask_spread'] = data['ask'] - data['bid']
-        data['order_book_imbalance'] = (data['bid_vol'] - data['ask_vol']) / (data['bid_vol'] + data['ask_vol'] + 1e-8)
-        data['delta_volumen'] = data['volume'].diff()
+        f['bid_ask_spread'] = (data['ask'] - data['bid']).rename('bid_ask_spread')
+        f['order_book_imbalance'] = ((data['bid_vol'] - data['ask_vol']) / (data['bid_vol'] + data['ask_vol'] + 1e-8)).rename('order_book_imbalance')
+        f['delta_volumen'] = data['volume'].diff().rename('delta_volumen')
 
         # 6. RÉGIMEN Y ESTADÍSTICA AVANZADA
         if self.use_causal_zscore:
-            data['price_zscore_20'] = self.safe_causal_zscore(data['close'], self.window)
+            f['price_zscore_20'] = self.safe_causal_zscore(data['close'], self.window).rename('price_zscore_20')
         else:
-            data['price_zscore_20'] = (data['close'] - data['close'].rolling(20).mean()) / data['close'].rolling(20).std()
-        data['realized_volatility'] = data['close'].pct_change().rolling(20).std() * np.sqrt(252 * 288)
-        data['hurst_exponent'] = self._calculate_hurst(data['close'], window=20)
+            close_roll = data['close'].rolling(20)
+            f['price_zscore_20'] = ((data['close'] - close_roll.mean()) / close_roll.std()).rename('price_zscore_20')
+            
+        f['realized_volatility'] = (data['close'].pct_change().rolling(20).std() * np.sqrt(252 * 288)).rename('realized_volatility')
+        f['hurst_exponent'] = self._calculate_hurst(data['close'], window=20).rename('hurst_exponent')
 
-        # GMM Hidden State – solo entrena sobre pasado para no ver el futuro
-        regime_features = data[['realized_volatility', 'price_zscore_20']]
+        # GMM Hidden State – Batch processing for efficiency
+        regime_features = pd.DataFrame({
+            'realized_volatility': f['realized_volatility'],
+            'price_zscore_20': f['price_zscore_20']
+        })
         states = np.full(len(data), 0.0)
-        window_size = 50
-        update_freq = 20 # Solo reentrenar cada 20 pasos para velocidad
+        window_size = 100
+        update_freq = 20
         
         gmm = None
-        for i in range(window_size, len(data)):
-            if i % update_freq == 0 or gmm is None:
-                train_window = regime_features.iloc[i - window_size:i].dropna()
-                if len(train_window) > 30:
-                    try:
-                        gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
-                        gmm.fit(train_window)
-                    except Exception:
-                        pass
+        for i in range(window_size, len(data), update_freq):
+            train_window = regime_features.iloc[i - window_size:i].dropna()
+            if len(train_window) > 50:
+                try:
+                    new_gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+                    new_gmm.fit(train_window)
+                    gmm = new_gmm
+                except Exception:
+                    pass
             
             if gmm is not None:
-                current_row = regime_features.iloc[i:i + 1]
-                states[i] = gmm.predict(current_row)[0]
+                end_idx = min(i + update_freq, len(data))
+                batch_features = regime_features.iloc[i:end_idx]
+                valid_mask = ~batch_features.isna().any(axis=1)
+                if valid_mask.any():
+                    states[i:end_idx][valid_mask.values] = gmm.predict(batch_features[valid_mask])
                 
-        data['hmm_hidden_state'] = states
+        f['hmm_hidden_state'] = pd.Series(states, index=data.index, name='hmm_hidden_state')
 
         # 7. CROSS-TIMEFRAME SIMULADO
-        data['ema_alignment'] = np.where(
-            (data['EMA_9'] > data['EMA_21']) & (data['EMA_21'] > data['EMA_50']), 1,
-            np.where((data['EMA_9'] < data['EMA_21']) & (data['EMA_21'] < data['EMA_50']), -1, 0)
-        )
+        f['ema_alignment'] = pd.Series(np.where(
+            (f['EMA_9'] > f['EMA_21']) & (f['EMA_21'] > f['EMA_50']), 1,
+            np.where((f['EMA_9'] < f['EMA_21']) & (f['EMA_21'] < f['EMA_50']), -1, 0)
+        ), index=data.index, name='ema_alignment')
+
+        # Combinación FINAL en una sola operación para evitar PerformanceWarning
+        feature_list = [v for v in f.values() if v is not None]
+        data = pd.concat([data] + feature_list, axis=1)
 
         # Limpieza FINAL sin backward fill
         data = data.dropna(subset=['EMA_200'])      # elimina filas iniciales sin indicadores de largo plazo
