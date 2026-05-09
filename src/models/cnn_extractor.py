@@ -2,10 +2,28 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+class CausalConv1d(nn.Conv1d):
+    """
+    Convolución 1D causal para evitar look-ahead bias en series temporales.
+    Aplica padding solo al inicio de la secuencia.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True):
+        self.__padding = (kernel_size - 1) * dilation
+        super(CausalConv1d, self).__init__(
+            in_channels, out_channels, kernel_size=kernel_size, stride=stride, 
+            padding=0, dilation=dilation, groups=groups, bias=bias)
+
+    def forward(self, x):
+        # x shape: (batch, channels, seq_len)
+        # Aplicamos padding manual a la izquierda
+        x = nn.functional.pad(x, (self.__padding, 0))
+        return super(CausalConv1d, self).forward(x)
+
 class CNN1DExtractor(nn.Module):
     """
-    Extractor de patrones locales usando CNN-1D.
+    Extractor de patrones locales usando CNN-1D Causal.
     Transforma una ventana temporal de features OHLCV+ en un embedding denso.
+    Diseñado para ser robusto a diferentes longitudes de secuencia y evitar fugas de información.
     """
     def __init__(self, num_features: int, sequence_length: int, embedding_dim: int = 64):
         super(CNN1DExtractor, self).__init__()
@@ -17,32 +35,40 @@ class CNN1DExtractor(nn.Module):
         self.sequence_length = sequence_length
         self.embedding_dim = embedding_dim
 
-        # Bloque Convolucional 1: Detección de micro-patrones (kernel=3, ej. 3 velas)
-        self.conv1 = nn.Conv1d(in_channels=num_features, out_channels=64, kernel_size=3, padding=1)
-        self.norm1 = nn.LayerNorm([64, sequence_length])
+        # Bloque Convolucional 1: Detección de micro-patrones
+        # Usamos CausalConv1d para asegurar que el output en t solo dependa de [0, t]
+        self.conv1 = CausalConv1d(in_channels=num_features, out_channels=64, kernel_size=3)
+        self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64) # GroupNorm suele ser más estable que LayerNorm en CNNs
         self.act1 = nn.GELU()
-        self.pool1 = nn.MaxPool1d(kernel_size=2)
-
-        # Bloque Convolucional 2: Agrupación de patrones (kernel=3)
-        seq_len_after_pool1 = sequence_length // 2
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.norm2 = nn.LayerNorm([128, seq_len_after_pool1])
-        self.act2 = nn.GELU()
-        self.pool2 = nn.MaxPool1d(kernel_size=2)
-
-        # Aplanado y proyección al espacio de embedding deseado
-        seq_len_after_pool2 = seq_len_after_pool1 // 2
-        flattened_size = 128 * seq_len_after_pool2
         
-        if flattened_size <= 0:
-            raise ValueError("La longitud de la secuencia es demasiado corta para las capas de pooling.")
+        # Bloque Convolucional 2: Agrupación de patrones con dilatación para mayor campo receptivo
+        self.conv2 = CausalConv1d(in_channels=64, out_channels=128, kernel_size=3, dilation=2)
+        self.norm2 = nn.GroupNorm(num_groups=8, num_channels=128)
+        self.act2 = nn.GELU()
 
+        # Adaptive Pooling: Permite que el extractor maneje cualquier sequence_length
+        # y produce una salida de tamaño fijo para la capa FC.
+        self.global_pool = nn.AdaptiveMaxPool1d(output_size=4) # Reducimos a 4 "puntos clave" temporales
+        
+        flattened_size = 128 * 4
+        
         self.fc_projection = nn.Sequential(
             nn.Linear(flattened_size, 256),
             nn.GELU(),
             nn.Dropout(p=0.3),
-            nn.Linear(256, embedding_dim)
+            nn.Linear(256, embedding_dim),
+            nn.LayerNorm(embedding_dim) # Normalizamos el embedding final
         )
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        """Inicialización de pesos Kaiming para capas con GELU."""
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -56,20 +82,20 @@ class CNN1DExtractor(nn.Module):
             raise ValueError(f"Se esperaba un tensor 3D (batch, seq, features), se recibió {x.dim()}D")
             
         # PyTorch Conv1d espera (batch_size, channels, sequence_length)
-        # Por lo tanto, transponemos las dimensiones 1 y 2
         x = x.transpose(1, 2)
         
         # Bloque 1
         x = self.conv1(x)
         x = self.norm1(x)
         x = self.act1(x)
-        x = self.pool1(x)
         
         # Bloque 2
         x = self.conv2(x)
         x = self.norm2(x)
         x = self.act2(x)
-        x = self.pool2(x)
+        
+        # Global Pooling
+        x = self.global_pool(x)
         
         # Aplanar (Flatten)
         x = x.flatten(start_dim=1)

@@ -1,14 +1,49 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple
+
+class AttentionPooling(nn.Module):
+    """
+    Mecanismo de atención para colapsar la dimensión temporal.
+    Permite al modelo aprender qué pasos de tiempo son más relevantes
+    para la señal final.
+    """
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq, hidden)
+        weights = self.attn(x)  # (batch, seq, 1)
+        weights = F.softmax(weights, dim=1)
+        # Suma ponderada: (batch, hidden)
+        return torch.sum(x * weights, dim=1)
 
 class BiLSTMEncoder(nn.Module):
     """
-    Codificador secuencial usando BiLSTM.
-    Captura dependencias temporales a largo plazo en la ventana de features
-    y las comprime en un embedding denso.
+    Codificador Temporal Robusto (LSTM/GRU).
+    Captura dependencias temporales en la ventana de features y las comprime
+    en un embedding denso calibrado para el motor de señales.
+    
+    Mejoras de producción:
+    - Inicialización Ortogonal para evitar gradientes desvanecientes.
+    - Pooling por Atención en lugar de solo usar el último estado oculto.
+    - Normalización por Capas (LayerNorm) para estabilidad numérica.
+    - Soporte para modo Causal (Unidireccional) por defecto.
     """
-    def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2, 
-                 dropout: float = 0.3, embedding_dim: int = 64):
+    def __init__(self, 
+                 input_size: int, 
+                 hidden_size: int = 64, 
+                 num_layers: int = 2, 
+                 dropout: float = 0.3, 
+                 embedding_dim: int = 64,
+                 bidirectional: bool = False,
+                 rnn_type: str = "lstm"):
         super(BiLSTMEncoder, self).__init__()
         
         if input_size <= 0 or hidden_size <= 0:
@@ -18,100 +53,132 @@ class BiLSTMEncoder(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.embedding_dim = embedding_dim
+        self.bidirectional = bidirectional
 
-        # Capa BiLSTM
-        # batch_first=True significa que la entrada debe ser (batch, seq, features)
-        self.lstm = nn.LSTM(
+        # Selección de celda recurrente
+        rnn_class = nn.LSTM if rnn_type.lower() == "lstm" else nn.GRU
+        
+        self.rnn = rnn_class(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=True
+            bidirectional=bidirectional
         )
 
-        # Proyección final: hidden_size * 2 porque es bidireccional
+        # Dimensión de salida del RNN
+        rnn_out_size = hidden_size * (2 if bidirectional else 1)
+        
+        # Capa de normalización post-RNN
+        self.ln_rnn = nn.LayerNorm(rnn_out_size)
+        
+        # Mecanismo de Atención Temporal
+        self.attention = AttentionPooling(rnn_out_size)
+
+        # Proyección final: MLP Robusto con GELU y LayerNorm
         self.fc_projection = nn.Sequential(
-            nn.Linear(hidden_size * 2, 128),
-            nn.LayerNorm(128),
+            nn.Linear(rnn_out_size, rnn_out_size * 2),
             nn.GELU(),
+            nn.LayerNorm(rnn_out_size * 2),
             nn.Dropout(p=dropout),
-            nn.Linear(128, embedding_dim)
+            nn.Linear(rnn_out_size * 2, embedding_dim),
+            nn.LayerNorm(embedding_dim)
         )
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        """
+        Inicialización robusta para producción.
+        Usa Orthogonal para las recurrencias y Xavier para las proyecciones.
+        """
+        for name, param in self.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.xavier_uniform_(param.data)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                nn.init.constant_(param.data, 0)
+                # Opcional: forget gate bias = 1 para LSTMs para ayudar con dependencias largas
+                if 'bias_ih' in name and isinstance(self.rnn, nn.LSTM):
+                    n = param.size(0)
+                    param.data[n//4:n//2].fill_(1.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass.
+        Forward pass del codificador.
         Args:
             x: Tensor de forma (batch_size, sequence_length, input_size)
         Returns:
-            Tensor de forma (batch_size, embedding_dim)
+            embedding: Tensor de forma (batch_size, embedding_dim)
         """
         if x.dim() != 3:
             raise ValueError(f"Se esperaba un tensor 3D (batch, seq, features), se recibió {x.dim()}D")
 
-        # Salida del LSTM:
-        # out: (batch_size, seq_length, hidden_size * 2) -> Todos los estados ocultos
-        # h_n: (num_layers * 2, batch_size, hidden_size) -> Último estado oculto
-        # c_n: (num_layers * 2, batch_size, hidden_size) -> Último estado de la celda
-        out, (h_n, c_n) = self.lstm(x)
-
-        # Extraemos el último estado oculto de la última capa para ambas direcciones
-        # h_n[-2, :, :] es la dirección forward de la última capa
-        # h_n[-1, :, :] es la dirección backward de la última capa
-        hidden_forward = h_n[-2, :, :]
-        hidden_backward = h_n[-1, :, :]
+        # Salida del RNN: (batch, seq, hidden * num_directions)
+        out, _ = self.rnn(x)
         
-        # Concatenamos ambas direcciones: shape (batch_size, hidden_size * 2)
-        last_hidden = torch.cat((hidden_forward, hidden_backward), dim=1)
+        # Aplicamos LayerNorm a la secuencia completa
+        out = self.ln_rnn(out)
+        
+        # Colapsamos la dimensión temporal mediante atención
+        # Esto permite capturar eventos importantes en cualquier punto de la ventana
+        context_vector = self.attention(out)
 
-        # Proyectamos al espacio de embedding deseado
-        embedding = self.fc_projection(last_hidden)
+        # Proyectamos al espacio de embedding final
+        embedding = self.fc_projection(context_vector)
 
         return embedding
 
 if __name__ == "__main__":
-    print("Inicializando BiLSTM Encoder...")
+    print("Inicializando Advanced Temporal Encoder...")
     
-    # Parámetros simulados (deben coincidir con la entrada de la CNN para paralelismo)
+    # Parámetros de prueba
     BATCH_SIZE = 32
-    SEQ_LENGTH = 60      # Ventana de 60 velas
-    NUM_FEATURES = 125   # ~120+ features generadas
-    HIDDEN_SIZE = 64     # Tamaño oculto interno del LSTM
-    EMBEDDING_DIM = 64   # Dimensión de salida para el TFT
+    SEQ_LENGTH = 60
+    NUM_FEATURES = 125
+    HIDDEN_SIZE = 64
+    EMBEDDING_DIM = 64
     
-    # Generar datos sintéticos (Batch, Sequence, Features)
     torch.manual_seed(42)
     synthetic_input = torch.randn(BATCH_SIZE, SEQ_LENGTH, NUM_FEATURES)
     
     try:
-        # Instanciar modelo
+        # Instanciar modelo (Causal por defecto)
         model = BiLSTMEncoder(
             input_size=NUM_FEATURES,
             hidden_size=HIDDEN_SIZE,
             num_layers=2,
             dropout=0.3,
-            embedding_dim=EMBEDDING_DIM
+            embedding_dim=EMBEDDING_DIM,
+            bidirectional=False # Strict causality
         )
         
-        # Modo evaluación
         model.eval()
         
         with torch.no_grad():
-            print(f"Tensor de entrada shape: {synthetic_input.shape} -> (Batch, Seq_Len, Features)")
+            print(f"Configuración: Causal=True, RNN=LSTM, Layers=2")
+            print(f"Input shape: {synthetic_input.shape}")
             
-            # Ejecutar forward pass
             output_embedding = model(synthetic_input)
             
-            print(f"Tensor de salida shape:  {output_embedding.shape} -> (Batch, Embedding_Dim)")
-            print("\nMuestra del embedding generado (primer elemento del batch, primeros 5 valores):")
-            print(output_embedding[0, :5].numpy())
+            print(f"Output shape: {output_embedding.shape}")
             
-            # Verificación de integridad
-            assert output_embedding.shape == (BATCH_SIZE, EMBEDDING_DIM), "Error en las dimensiones de salida"
-            assert not torch.isnan(output_embedding).any(), "El embedding contiene NaNs"
+            # Verificaciones
+            assert output_embedding.shape == (BATCH_SIZE, EMBEDDING_DIM)
+            assert not torch.isnan(output_embedding).any()
             
-            print("\n[OK] Módulo BiLSTM ejecutado exitosamente sin errores ni NaNs.")
+            print("\n[OK] Codificador avanzado ejecutado exitosamente.")
+            
+            # Prueba de JIT (TorchScript)
+            print("Verificando compatibilidad con TorchScript...")
+            scripted_model = torch.jit.script(model)
+            scripted_output = scripted_model(synthetic_input)
+            assert torch.allclose(output_embedding, scripted_output)
+            print("[OK] Modelo compatible con TorchScript para producción.")
             
     except Exception as e:
-        print(f"\n[ERROR] Fallo en la ejecución del BiLSTM: {str(e)}")
+        print(f"\n[ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
