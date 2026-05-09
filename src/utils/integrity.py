@@ -1,8 +1,5 @@
 import pandas as pd
 import numpy as np
-
-import pandas as pd
-import numpy as np
 from typing import Callable
 
 def latent_leakage_test(df: pd.DataFrame, feature_generator_func: Callable[[pd.DataFrame], pd.DataFrame]):
@@ -81,15 +78,15 @@ def temporal_integrity_check(df: pd.DataFrame, target_col: str = 'target', horiz
         
     # 3. Verificar desfase temporal (Shift check)
     # Si shift(-horizon) de una feature es igual al target, hay fuga.
+    target_shifted = target.shift(horizon).values[horizon:]
     for col in features.columns:
         try:
-            # Comparamos valores ignorando NaNs
             feat_vals = features[col].values[horizon:]
-            target_shifted = target.shift(horizon).values[horizon:]
             if np.array_equal(feat_vals, target_shifted):
-                 print(f"ADVERTENCIA: La feature '{col}' parece ser el target desplazado.")
-        except:
-            pass
+                print(f"ADVERTENCIA: La feature '{col}' parece ser el target desplazado.")
+        except (TypeError, ValueError):
+            # Columnas no numéricas u otros tipos no comparables se ignoran.
+            continue
 
     print("[OK] Integridad temporal validada.")
     return True
