@@ -79,18 +79,22 @@ class FeatureGenerator:
 
     def safe_causal_zscore(self, series: pd.Series, window: int) -> pd.Series:
         """
-        Calcula el Z-Score de forma causal (solo usando datos pasados).
-        Evita el look-ahead bias al no usar la media/std del dataset completo.
+        Calcula el Z-Score de forma estrictamente causal.
+        Usa .shift(1) para asegurar que el valor en T se normalice contra la 
+        distribución de [T-window, T-1], evitando que T influya en su propia normalización.
         """
-        rolling_mean = series.rolling(window=window).mean()
-        rolling_std = series.rolling(window=window).std()
+        # El shift(1) es obligatorio para la causalidad estricta
+        rolling_mean = series.rolling(window=window, min_periods=window).mean().shift(1)
+        rolling_std = series.rolling(window=window, min_periods=window).std().shift(1)
         
         if self.mad_fallback:
             # Fallback a Mean Absolute Deviation si la std es 0 o muy pequeña
-            rolling_mad = series.rolling(window=window).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+            rolling_mad = series.rolling(window=window, min_periods=window).apply(
+                lambda x: np.abs(x - np.median(x)).mean(), raw=True
+            ).shift(1)
             rolling_std = np.where(rolling_std < 1e-8, rolling_mad + 1e-8, rolling_std)
             
-        return (series - rolling_mean) / rolling_std
+        return (series - rolling_mean) / (rolling_std + 1e-8)
 
     def _calculate_hurst(self, series: pd.Series, window: int = 20) -> pd.Series:
         """Hurst exponent en ventana móvil para detectar regímenes mediante Numba."""
@@ -119,8 +123,8 @@ class FeatureGenerator:
         
         ichi = data.ta.ichimoku()
         if ichi is not None:
+            # Solo usamos la primera parte que contiene Tenkan, Kijun y spans actuales
             f['ICHIMOKU'] = ichi[0]
-            f['ICHIMOKU_SPAN'] = ichi[1]
 
         # 2. MOMENTUM
         f['RSI_7'] = data.ta.rsi(length=7)
