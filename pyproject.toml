@@ -27,13 +27,10 @@ classifiers = [
 dependencies = [
     # Deep Learning & series temporales
     "torch>=2.2.1,<2.5.0",
-    "pytorch-forecasting>=1.0.0,<1.1.0",
     # Ensamble de árboles
     "xgboost>=2.0.3,<2.1.0",
-    "lightgbm>=4.3.0,<4.4.0",
     # Feature engineering financiero
     "pandas-ta>=0.3.14b0,<0.4.0",
-    "TA-Lib>=0.4.28,<0.5.0",   # Requiere instalación binaria nativa
     # Calibración de probabilidades (baja latencia)
     "numba>=0.59.0,<0.60.0",
     "scikit-learn>=1.4.1,<1.5.0",

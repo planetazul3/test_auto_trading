@@ -114,6 +114,16 @@
                 "range": "[-5, 5]",
                 "type": "relative",
                 "stationary": true
+            },
+            "ATR_Volatility_Ratio": {
+                "range": "(0, +inf)",
+                "type": "relative",
+                "stationary": true
+            },
+            "Distance_From_SMA200": {
+                "range": "(-inf, +inf)",
+                "type": "relative",
+                "stationary": true
             }
         }
     }

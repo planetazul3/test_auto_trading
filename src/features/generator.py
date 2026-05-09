@@ -14,7 +14,16 @@ warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 @njit
 def _fast_hurst(x: np.ndarray) -> float:
-    """Calcula el Hurst exponent de una serie pequeña usando regresión lineal sobre lags."""
+    """
+    Hurst exponent vía método de varianza:
+
+        Var(x[t+k] - x[t]) ∝ k^(2H)
+
+    Equivalentemente ``log(sqrt(std)) = 0.25 * log(Var)`` y la pendiente
+    de ``log(sqrt(std))`` vs ``log(k)`` es ``H/2``; por eso se multiplica
+    por 2 al final. Se clipa a [0, 1] para conservar la interpretación del
+    Blueprint §4.1 (H<0.5 mean-reverting, H>0.5 trending).
+    """
     if len(x) < 10:
         return 0.5
     lags = np.arange(2, 10)
@@ -25,9 +34,10 @@ def _fast_hurst(x: np.ndarray) -> float:
         lag = lags[i]
         diff = x[lag:] - x[:-lag]
         std_val = np.std(diff)
-        log_tau[i] = np.log(np.sqrt(std_val))
+        if std_val <= 0.0:
+            return 0.5
+        log_tau[i] = 0.5 * np.log(std_val)
 
-    # Regresión lineal simple: y = mx + c
     n = len(log_lags)
     sum_x = np.sum(log_lags)
     sum_y = np.sum(log_tau)
@@ -38,7 +48,12 @@ def _fast_hurst(x: np.ndarray) -> float:
     if denom == 0:
         return 0.5
     slope = (n * sum_xy - sum_x * sum_y) / denom
-    return slope * 2.0
+    h = slope * 2.0
+    if h < 0.0:
+        return 0.0
+    if h > 1.0:
+        return 1.0
+    return h
 
 
 @njit
@@ -79,21 +94,29 @@ class FeatureGenerator:
 
     def safe_causal_zscore(self, series: pd.Series, window: int) -> pd.Series:
         """
-        Calcula el Z-Score de forma estrictamente causal.
-        Usa .shift(1) para asegurar que el valor en T se normalice contra la 
-        distribución de [T-window, T-1], evitando que T influya en su propia normalización.
+        Z-Score estrictamente causal (Blueprint §3.1).
+
+        El valor en T se normaliza contra el resumen de [T-window, T-1]: las
+        estadísticas se calculan con ``.rolling(window).<stat>().shift(1)`` para
+        que T no influya en su propia normalización. Si ``mad_fallback`` está
+        activo, ventanas con std degenerada caen a la Median Absolute Deviation
+        (mediana de |x - median(x)|) escalada por 1.4826 para mantener
+        consistencia con la desviación estándar bajo distribución normal.
         """
-        # El shift(1) es obligatorio para la causalidad estricta
-        rolling_mean = series.rolling(window=window, min_periods=window).mean().shift(1)
-        rolling_std = series.rolling(window=window, min_periods=window).std().shift(1)
-        
+        roll = series.rolling(window=window, min_periods=window)
+        rolling_mean = roll.mean().shift(1)
+        rolling_std = roll.std().shift(1)
+
         if self.mad_fallback:
-            # Fallback a Mean Absolute Deviation si la std es 0 o muy pequeña
-            rolling_mad = series.rolling(window=window, min_periods=window).apply(
-                lambda x: np.abs(x - np.median(x)).mean(), raw=True
+            rolling_mad = roll.apply(
+                lambda x: np.median(np.abs(x - np.median(x))) * 1.4826,
+                raw=True,
             ).shift(1)
-            rolling_std = np.where(rolling_std < 1e-8, rolling_mad + 1e-8, rolling_std)
-            
+            rolling_std = pd.Series(
+                np.where(rolling_std < 1e-8, rolling_mad + 1e-8, rolling_std),
+                index=series.index,
+            )
+
         return (series - rolling_mean) / (rolling_std + 1e-8)
 
     def _calculate_hurst(self, series: pd.Series, window: int = 20) -> pd.Series:
@@ -121,9 +144,11 @@ class FeatureGenerator:
         f['DEMA_20'] = data.ta.dema(length=20)
         f['TEMA_20'] = data.ta.tema(length=20)
         
-        ichi = data.ta.ichimoku()
+        # Ichimoku con lookahead=False: pandas_ta por defecto desplaza Senkou
+        # Span A/B 26 períodos hacia adelante, lo que introduce look-ahead.
+        ichi = data.ta.ichimoku(lookahead=False)
         if ichi is not None:
-            # Solo usamos la primera parte que contiene Tenkan, Kijun y spans actuales
+            # ichi es una tupla (visible, forward); sólo usamos la parte visible.
             f['ICHIMOKU'] = ichi[0]
 
         # 2. MOMENTUM
@@ -140,6 +165,11 @@ class FeatureGenerator:
         # 3. VOLATILIDAD
         f['ATR_7'] = data.ta.atr(length=7)
         f['ATR_14'] = data.ta.atr(length=14)
+        atr_long = data.ta.atr(length=100)
+        # Blueprint §4.1: ATR Volatility Ratio = ATR_short / ATR_long.
+        f['atr_volatility_ratio'] = (f['ATR_7'] / (atr_long + 1e-8)).rename(
+            'atr_volatility_ratio'
+        )
         f['BBANDS'] = data.ta.bbands(length=20, std=2)
         f['KC'] = data.ta.kc(length=20)
         f['DONCHIAN'] = data.ta.donchian(lower_length=20, upper_length=20)
@@ -172,34 +202,56 @@ class FeatureGenerator:
         f['realized_volatility'] = (data['close'].pct_change().rolling(20).std() * np.sqrt(252 * 288)).rename('realized_volatility')
         f['hurst_exponent'] = self._calculate_hurst(data['close'], window=20).rename('hurst_exponent')
 
-        # GMM Hidden State – Batch processing for efficiency
+        # Blueprint §4.1 #2: Distance from 200-SMA, normalizada.
+        sma200 = data['close'].rolling(window=200, min_periods=200).mean()
+        f['dist_from_sma200'] = ((data['close'] - sma200) / (sma200 + 1e-8)).rename(
+            'dist_from_sma200'
+        )
+
+        # GMM Hidden State con etiquetas estables.
+        #
+        # Problema: GMM(random_state=42) puede asignar permutaciones distintas
+        # de cluster_id en cada reentrenamiento sobre ventanas distintas.
+        # Solución: tras cada fit, reordenamos los clusters por la media de la
+        # `realized_volatility` (col 0) para forzar un mapping determinista
+        # 0 → baja vol, 1 → media vol, 2 → alta vol.
         regime_features = pd.DataFrame({
             'realized_volatility': f['realized_volatility'],
             'price_zscore_20': f['price_zscore_20']
         })
-        states = np.full(len(data), 0.0)
+        states = np.full(len(data), np.nan, dtype=np.float64)
         window_size = 100
         update_freq = 20
-        
+
         gmm = None
+        label_map = np.array([0, 1, 2], dtype=np.int64)
         for i in range(window_size, len(data), update_freq):
             train_window = regime_features.iloc[i - window_size:i].dropna()
             if len(train_window) > 50:
                 try:
-                    new_gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+                    new_gmm = GaussianMixture(
+                        n_components=3, covariance_type='full', random_state=42
+                    )
                     new_gmm.fit(train_window)
+                    # Orden estable: ranking por media de realized_volatility.
+                    vol_means = new_gmm.means_[:, 0]
+                    order = np.argsort(vol_means)
+                    label_map = np.argsort(order)  # cluster_id -> regime_id
                     gmm = new_gmm
                 except Exception:
                     pass
-            
+
             if gmm is not None:
                 end_idx = min(i + update_freq, len(data))
                 batch_features = regime_features.iloc[i:end_idx]
                 valid_mask = ~batch_features.isna().any(axis=1)
                 if valid_mask.any():
-                    states[i:end_idx][valid_mask.values] = gmm.predict(batch_features[valid_mask])
-                
-        f['hmm_hidden_state'] = pd.Series(states, index=data.index, name='hmm_hidden_state')
+                    raw = gmm.predict(batch_features[valid_mask])
+                    states[i:end_idx][valid_mask.values] = label_map[raw]
+
+        f['hmm_hidden_state'] = pd.Series(
+            states, index=data.index, name='hmm_hidden_state'
+        )
 
         # 7. CROSS-TIMEFRAME SIMULADO
         f['ema_alignment'] = pd.Series(np.where(
@@ -207,11 +259,16 @@ class FeatureGenerator:
             np.where((f['EMA_9'] < f['EMA_21']) & (f['EMA_21'] < f['EMA_50']), -1, 0)
         ), index=data.index, name='ema_alignment')
 
-        # Combinación FINAL en una sola operación para evitar PerformanceWarning
+        # Combinación FINAL en una sola operación para evitar PerformanceWarning.
         feature_list = [v for v in f.values() if v is not None]
         data = pd.concat([data] + feature_list, axis=1)
 
-        # Limpieza FINAL sin backward fill
+        # Algunos indicadores de pandas_ta (p. ej. ichimoku) mutan ``data`` en
+        # sitio agregando columnas; combinado con el dict ``f`` se introducen
+        # nombres repetidos. Conservamos la primera ocurrencia.
+        data = data.loc[:, ~data.columns.duplicated()]
+
+        # Limpieza FINAL sin backward fill.
         data = data.dropna(subset=['EMA_200'])      # elimina filas iniciales sin indicadores de largo plazo
         data = data.ffill()                         # solo forward fill, nunca información futura
         return data

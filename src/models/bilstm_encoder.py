@@ -26,9 +26,12 @@ class AttentionPooling(nn.Module):
 
 class BiLSTMEncoder(nn.Module):
     """
-    Codificador Temporal Robusto (LSTM/GRU).
-    Captura dependencias temporales en la ventana de features y las comprime
-    en un embedding denso calibrado para el motor de señales.
+    Codificador temporal LSTM/GRU.
+
+    El nombre conserva el prefijo "Bi" por compatibilidad histórica, pero
+    ``bidirectional=False`` es el default obligatorio en el pipeline causal del
+    motor de señales: una pasada hacia atrás violaría la regla de causalidad
+    estricta del Blueprint §1.2 (look-ahead a través del futuro encoder).
     """
     def __init__(self, 
                  input_size: int, 

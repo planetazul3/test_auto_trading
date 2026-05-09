@@ -61,7 +61,7 @@ def generate_audit_dump():
     files_to_audit.update(get_force_included_files(project_root))
 
     # 3. Add top-level configs manually to ensure they are captured
-    top_configs = ['pyproject.toml', '.gitignore', 'README.md', 'uv.lock', 'GEMINI.md']
+    top_configs = ['pyproject.toml', '.gitignore', 'README.md', 'uv.lock']
     for config in top_configs:
         if (project_root / config).exists():
             files_to_audit.add(config)

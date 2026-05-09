@@ -67,10 +67,12 @@ class CNN1DExtractor(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Inicialización de pesos Kaiming."""
+        """Xavier normal para activación GELU (la ganancia de ReLU sobre-escala
+        la varianza de salida con GELU; xavier mantiene el primer/segundo
+        momento de las pre-activaciones)."""
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.xavier_normal_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 

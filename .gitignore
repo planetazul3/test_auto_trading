@@ -62,3 +62,6 @@ Thumbs.db
 # Audit
 project_audit_dump.txt
 *audit*
+
+# MLflow tracking artifacts
+mlruns/

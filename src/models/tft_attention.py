@@ -126,12 +126,13 @@ class TFTFusionNode(nn.Module):
         seq_len = x.size(1)
         mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
         
-        # 3. Multi-Head Attention Temporal
+        # 3. Multi-Head Attention Temporal (causal explícita).
         attn_output, attn_weights_opt = self.multihead_attn(
-            query=x, key=x, value=x, 
-            attn_mask=mask
+            query=x, key=x, value=x,
+            attn_mask=mask,
+            is_causal=True,
         )
-        
+
         attn_weights = attn_weights_opt if attn_weights_opt is not None else torch.empty(0)
         
         x = self.norm1(x + attn_output)

@@ -37,6 +37,17 @@ Para visualizar los resultados y métricas en MLflow:
 uv run mlflow ui
 ```
 
+## Validación de Integridad
+
+El pipeline incluye un test de spike-injection (Blueprint §3.2) que se ejecuta
+dentro de `main.py` antes del entrenamiento, además de un sanity-check de
+duplicación del target. La suite completa de pytest cubre el generator,
+calibrador, modelos profundos y la verificación de leakage:
+
+```bash
+uv run pytest tests/
+```
+
 ## Auditoría
 
 El proyecto incluye una herramienta para consolidar todo el código fuente en un único archivo de auditoría:
@@ -51,6 +62,7 @@ uv run python scripts/generate_audit_dump.py
 - PyTorch
 - XGBoost
 - pandas-ta
-- MLflow
+- numba
 - scikit-learn
-- SHAP
+- MLflow (opcional, para tracking)
+- SHAP (opcional, para interpretabilidad)
