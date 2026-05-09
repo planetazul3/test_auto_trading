@@ -3,22 +3,16 @@ Motor de señales híbrido que unifica CNN, BiLSTM, TFT y XGBoost.
 Versión 2.0: soporta entrenamiento separado de componentes profundos
 y ajuste del meta-learner con embeddings precomputados o con tensor crudo.
 """
-import sys
-import os
 import json
 import datetime
 import torch
 import torch.nn as nn
 import numpy as np
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
 from src.models.cnn_extractor import CNN1DExtractor
 from src.models.bilstm_encoder import BiLSTMEncoder
 from src.models.tft_attention import TFTFusionNode
 from src.models.meta_learner import RegimeAwareMetaLearner
-
-
 from src.models.calibration import LowLatencyRollingIsotonicCalibrator
 
 class HybridSignalEngine(nn.Module):
