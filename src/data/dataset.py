@@ -25,12 +25,12 @@ TOUCH/NOTOUCH…) con su lista de horizontes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, NamedTuple, Optional, Sequence
+from typing import Any, Iterable, Mapping, NamedTuple, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset
 
 from src.connectors.deriv.storage import DuckDBStore
 from src.data.features import (
@@ -223,6 +223,52 @@ class WindowDataset(Dataset[WindowSample]):
         return self._epochs[self._anchor_indices]
 
 
+class MultiSymbolWindowDataset(ConcatDataset):
+    """Concatena varios ``WindowDataset`` preservando los IDs por sample.
+
+    Cada sub-dataset registra su propio ``(symbol_id, granularity_id)`` en el
+    ``AssetTimeframeEmbedding`` compartido. Como cada ``WindowSample`` ya
+    lleva esos IDs adentro, ``ConcatDataset`` los mantiene intactos al
+    indexar — no hay riesgo de mezclar símbolos entre ranks.
+
+    Conveniencia: ``num_features`` y ``feature_names`` se exigen idénticos
+    en todos los sub-datasets (mismo schema → mismo input layer del modelo).
+    Si no coinciden, falla rápido al construir.
+    """
+
+    def __init__(self, datasets: Iterable[WindowDataset]) -> None:
+        ds_list = list(datasets)
+        if not ds_list:
+            raise ValueError("datasets must be non-empty")
+        n_feats = ds_list[0].num_features
+        names = ds_list[0].feature_names
+        for d in ds_list[1:]:
+            if d.num_features != n_feats:
+                raise ValueError(
+                    f"all datasets must share num_features; got {n_feats} and "
+                    f"{d.num_features}"
+                )
+            if d.feature_names != names:
+                raise ValueError(
+                    "all datasets must share feature_names (same schema)"
+                )
+        super().__init__(ds_list)
+        self._num_features = n_feats
+        self._feature_names = list(names)
+
+    @property
+    def num_features(self) -> int:
+        return self._num_features
+
+    @property
+    def feature_names(self) -> list[str]:
+        return list(self._feature_names)
+
+    @property
+    def sub_datasets(self) -> list[WindowDataset]:
+        return list(self.datasets)  # type: ignore[return-value]
+
+
 def collate_window_samples(batch: Sequence[WindowSample]) -> dict[str, torch.Tensor]:
     """Collate function compatible con ``DataLoader``."""
     if not batch:
@@ -239,6 +285,7 @@ def collate_window_samples(batch: Sequence[WindowSample]) -> dict[str, torch.Ten
 
 __all__ = [
     "LabelSpec",
+    "MultiSymbolWindowDataset",
     "WindowDataset",
     "WindowDatasetConfig",
     "WindowSample",

@@ -9,7 +9,14 @@ y candles persistidos) y los modelos. Soporta:
 * DDP-aware sampler con purged time-series split.
 """
 
-from .dataset import WindowDataset, WindowSample
+from .dataset import (
+    LabelSpec,
+    MultiSymbolWindowDataset,
+    WindowDataset,
+    WindowDatasetConfig,
+    WindowSample,
+    collate_window_samples,
+)
 from .features import (
     BaseFeatureBuilder,
     CandleFeatureBuilder,
@@ -33,12 +40,16 @@ __all__ = [
     "ContractLabeler",
     "DERIV_LABELERS",
     "DistributedTimeSeriesSampler",
+    "LabelSpec",
+    "MultiSymbolWindowDataset",
     "StoreView",
     "TickFeatureBuilder",
     "WindowDataset",
+    "WindowDatasetConfig",
     "WindowSample",
     "build_feature_builder",
     "callput_labeler",
+    "collate_window_samples",
     "digit_even_odd_labeler",
     "higherlower_labeler",
     "load_candles",
