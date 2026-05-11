@@ -123,19 +123,22 @@ Leyenda:
 
 ---
 
-## P4 — Bajos *(pantalla no adjunta — placeholder para completar)*
+## P4 — Bajos (pulido y rendimiento)
 
-> Pendiente recibir el detalle exacto de la captura faltante. Items típicos esperados (sin confirmar):
-- [ ] **31.** Docstrings de retorno faltantes en `hybrid_tft.forward` / `tft_attention.forward`.
-- [ ] **32.** Sin hook de hyper-tuning expuesto en `meta_learner` (Optuna/Hyperopt).
-- [ ] **33.** Init de pesos no documentado en backbone (`xavier/orthogonal/forget-bias=1`).
-- [ ] **34.** `repr()` / `extra_repr()` no informativo en módulos custom.
-- [ ] **35.** Falta `torch.jit.script`/`torch.compile` smoke test.
-- [ ] **36.** No hay `model.summary()` / count de parámetros expuesto.
-- [ ] **37.** Falta logging estructurado en cambios de régimen.
-- [ ] **38.** Sin contract test del payload JSON de `generate_signal` (schema fijo).
+- [ ] **31. `bilstm_encoder.py` — `embedding_dim` por defecto coincide con `hidden_size` (64) por accidente.**
+  Acoplamiento implícito que confunde al usuario. **Fix propuesto:** documentar el contrato en el docstring y/o derivar uno del otro explícitamente; alternativamente hacer `embedding_dim = hidden_size * (2 if bidirectional else 1)` y exponer un override.
 
-> **Acción requerida**: enviar foto/texto de P4 para reemplazar este placeholder por la lista exacta y trackearla con el mismo formato.
+- [ ] **32. Toda la familia — Sin soporte `torch.amp.autocast` ni `.half()` coherente.**
+  Para producción de baja latencia (mencionada en el blueprint) conviene un path FP16/BF16 probado. **Status parcial:** `Trainer` ya soporta `precision={fp32,fp16,bf16}` con `autocast` y `GradScaler` para training; **falta** un test de inferencia FP16 sobre `BackboneWithHeads` que verifique numerical stability vs FP32 (tolerancia 1e-2). Pendiente: `model.half()` smoke + benchmark de latencia FP16 vs FP32.
+
+- [ ] **33. `calibration.py` — `deque → np.array` cada update es O(N).**
+  Para `window_size=5000` es trivial, pero un ring buffer NumPy elimina la copia y los warm-starts del PAVA. **Fix propuesto:** reemplazar `self.margins/self.labels` por dos `np.ndarray` pre-allocados de tamaño `window_size` + un cursor `_head` y un `_count` para wrap-around; `update_calibration_curve` lee con `np.concatenate((buf[head:], buf[:head]))[:count]` (O(1) sin reasignar).
+
+- [ ] **34. Toda la familia — Cada archivo lleva su propio `__main__` con prints/seeds.**
+  **Status parcial:** los `__main__` de los archivos en `src/models/` ya fueron limpiados al refactorizar (no hay smoke-prints residuales en la versión actual). Confirmar grep final y, si quedaran, mover a `scripts/` o a `tests/test_models_smoke.py` con asserts.
+
+- [ ] **35. `tft_attention.py` — Sin máscara de padding.**
+  **Status parcial:** el parámetro `key_padding_mask: Optional[torch.Tensor]` ya está expuesto en `TFTFusionNode.forward` y se pasa al `MultiheadAttention`. **Falta** test que verifique enmascarado correcto con secuencias variables (e.g. logits idénticos a los de una versión sin padding cuando se enmascara la cola).
 
 ---
 
@@ -181,3 +184,19 @@ Leyenda:
 - [ ] **F2.** GitHub Actions con matrix Python 3.11/3.12 (3.12 sí tiene `pandas-ta`).
 - [ ] **F3.** Pre-commit hooks (ruff + mypy strict en `src/`).
 - [ ] **F4.** Benchmarks de latencia de `generate_signal` (target p99 < 5ms en CPU).
+
+### Hyperparameter tuning (Optuna)
+> **Necesario.** Ya tenemos `TrainingConfig` paramétrica; Optuna se enchufa encima sin
+> tocar runtime. Plan en fases:
+
+- [ ] **G1. Wrapper `src/training/tuning.py`** — `tune(study, n_trials, search_space, base_cfg, datasets) → optuna.Study`. `objective(trial)` muestrea `lr`, `dropout`, `embedding_dim`, `lstm_hidden`, `num_attention_heads`, `cnn_channels`, `barrier_pct`, `calibrator_window`. Construye `TrainingConfig` derivado y entrena.
+- [ ] **G2. Métrica objetivo: Brier post-calibración** del cabezal CALL/PUT (no `val_loss` cruda — alinea con utilidad de producción). Multi-objective opcional para coverage del conformal interval (depende de B3).
+- [ ] **G3. Pruner `MedianPruner(n_warmup_steps=2, n_min_trials=5)`**, intermediates por epoch. Subir a `HyperbandPruner` cuando se escale a >100 trials.
+- [ ] **G4. Walk-forward dentro del trial** — `k=3` folds con `purged_split` y promediar. Sin esto Optuna sobreajusta al fold único de validación. Coste ~3x.
+- [ ] **G5. Storage SQLite** (`optuna.db`, `load_if_exists=True`) para resumir entre sesiones.
+- [ ] **G6. Estrategia DDP/trial**: cada trial = single-GPU/CPU. Optuna paraleliza con `n_jobs=k`, un GPU por trial. DDP queda reservado al fit final con hyperparams ganadores.
+- [ ] **G7. Tuner XGBoost** del `RegimeAwareMetaLearner` con `optuna.integration.XGBoostPruningCallback` + `early_stopping_rounds`. Tunea `max_depth`, `lr`, `n_estimators`, `subsample`, `class_weight`. Ejecución barata (sin GPU).
+- [ ] **G8. CLI `scripts/tune.py`**: `--study-name`, `--n-trials`, `--storage`, `--target {brier,val_loss,sharpe}`, `--max-epochs-per-trial`, `--search-space yaml`.
+- [ ] **G9. Tests** con `optuna.samplers.RandomSampler` + `n_trials=2` + `max_epochs=1` para no inflar la suite con corridas reales.
+
+> **Riesgos a mitigar**: no tunear `barrier_pct` del label (induce leakage); usar `PatientPruner` con datasets pequeños; tunear primero por contrato y luego armonizar (los contratos con menos data dominan el ruido si se mezclan).
