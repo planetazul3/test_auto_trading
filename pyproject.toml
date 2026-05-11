@@ -67,6 +67,13 @@ deriv = [
     "httpx>=0.27.0,<0.28.0",
 ]
 
+# Ingesta resiliente Deriv (DuckDB + backfill + streaming)
+deriv-ingest = [
+    "websockets>=12.0,<14.0",
+    "httpx>=0.27.0,<0.28.0",
+    "duckdb>=0.10.0,<2.0.0",
+]
+
 # Seguimiento de experimentos (MLflow)
 experiment = [
     "mlflow>=2.11.1,<2.12.0",

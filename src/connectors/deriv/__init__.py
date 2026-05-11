@@ -38,9 +38,22 @@ from .exceptions import (
     DerivRateLimitError,
     DerivSubscriptionError,
 )
+from .ingest import (
+    AdaptiveRateLimiter,
+    IngestStats,
+    MarketDataIngester,
+)
+from .storage import (
+    SCHEMA_VERSION,
+    CandleRow,
+    DuckDBStore,
+    TickRow,
+)
 
 __all__ = [
+    "AdaptiveRateLimiter",
     "CANDLE_GRANULARITIES",
+    "CandleRow",
     "DEFAULT_AUTH_URL",
     "DEFAULT_DEMO_URL",
     "DEFAULT_PUBLIC_URL",
@@ -56,5 +69,10 @@ __all__ = [
     "DerivRateLimitError",
     "DerivSubscriptionError",
     "DerivWebSocketClient",
+    "DuckDBStore",
+    "IngestStats",
+    "MarketDataIngester",
     "PKCEParameters",
+    "SCHEMA_VERSION",
+    "TickRow",
 ]
