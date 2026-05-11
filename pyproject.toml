@@ -61,6 +61,12 @@ bridge = [
     "MetaTrader5>=5.0.45",
 ]
 
+# Conector WebSocket Deriv API v2 (asíncrono)
+deriv = [
+    "websockets>=12.0,<14.0",
+    "httpx>=0.27.0,<0.28.0",
+]
+
 # Seguimiento de experimentos (MLflow)
 experiment = [
     "mlflow>=2.11.1,<2.12.0",
@@ -83,7 +89,7 @@ build-backend = "hatchling.build"
 
 # Configuración del layout de fuente (estándar src)
 [tool.hatch.build.targets.wheel]
-packages = ["src/features", "src/models", "src/utils"]
+packages = ["src/features", "src/models", "src/utils", "src/connectors"]
 
 [tool.hatch.build]
 include = [
