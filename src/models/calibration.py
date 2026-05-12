@@ -18,7 +18,6 @@ Funcionalidad:
 from __future__ import annotations
 
 import threading
-from collections import deque
 from typing import Optional, Tuple
 
 import numpy as np
@@ -87,8 +86,15 @@ class LowLatencyRollingIsotonicCalibrator:
         self.window_size = int(window_size)
         self.min_observations = int(min_observations)
 
-        self.margins: deque[float] = deque(maxlen=window_size)
-        self.labels: deque[int] = deque(maxlen=window_size)
+        # Ring buffer NumPy pre-allocado: ``add_observation`` es O(1) y
+        # ``update_calibration_curve`` evita una copia O(N) (sólo
+        # concatena dos vistas si hubo wrap-around). Esto mantiene a la
+        # PAVA contenta con arrays float64 contiguos.
+        self._margins_buf = np.zeros(self.window_size, dtype=np.float64)
+        self._labels_buf = np.zeros(self.window_size, dtype=np.float64)
+        self._head: int = 0   # próxima posición a escribir
+        self._count: int = 0  # observaciones válidas en el buffer
+
         self.model: IsotonicRegression = IsotonicRegression(out_of_bounds="clip")
 
         # Curva como una sola tupla → lecturas atómicas en Python (GIL).
@@ -105,26 +111,52 @@ class LowLatencyRollingIsotonicCalibrator:
 
     def add_observation(self, margin: float, label: int) -> None:
         with self._lock:
-            self.margins.append(float(margin))
-            self.labels.append(int(label))
+            self._margins_buf[self._head] = float(margin)
+            self._labels_buf[self._head] = float(int(label))
+            self._head = (self._head + 1) % self.window_size
+            if self._count < self.window_size:
+                self._count += 1
 
     def reset(self) -> None:
         """Vacía el buffer y resetea la curva (útil en walk-forward)."""
         with self._lock:
-            self.margins.clear()
-            self.labels.clear()
+            self._head = 0
+            self._count = 0
             self._curve = _NEUTRAL_CURVE
             self.is_fitted = False
 
     @property
     def n_observations(self) -> int:
         with self._lock:
-            return len(self.margins)
+            return int(self._count)
 
     @property
     def curve(self) -> Tuple[np.ndarray, np.ndarray]:
         """Snapshot atómico ``(x_thresholds, y_values)``."""
         return self._curve
+
+    def _snapshot_buffer(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Copia el contenido del ring buffer en orden temporal.
+
+        Si no hay wrap-around (``count < window_size`` o ``head == 0``
+        con buffer lleno), una única vista contigua es suficiente.
+        """
+        n = self._count
+        if n == 0:
+            return (
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+            )
+        if n < self.window_size:
+            # Buffer aún no completo: las primeras ``count`` posiciones son válidas.
+            x = self._margins_buf[:n].copy()
+            y = self._labels_buf[:n].copy()
+        else:
+            # Wrap-around: orden temporal = [head:] ++ [:head].
+            h = self._head
+            x = np.concatenate((self._margins_buf[h:], self._margins_buf[:h]))
+            y = np.concatenate((self._labels_buf[h:], self._labels_buf[:h]))
+        return x, y
 
     # ------------------------------------------------------------------
     # Fit
@@ -133,10 +165,9 @@ class LowLatencyRollingIsotonicCalibrator:
     def update_calibration_curve(self) -> bool:
         """Re-fit síncrono. Devuelve ``True`` si la curva se actualizó."""
         with self._lock:
-            if len(self.margins) < self.min_observations:
+            if self._count < self.min_observations:
                 return False
-            x = np.fromiter(self.margins, dtype=np.float64, count=len(self.margins))
-            y = np.fromiter(self.labels, dtype=np.float64, count=len(self.labels))
+            x, y = self._snapshot_buffer()
 
         new_model = IsotonicRegression(out_of_bounds="clip").fit(x, y)
         x_th = np.asarray(new_model.X_thresholds_, dtype=np.float64).copy()
@@ -230,8 +261,7 @@ class LowLatencyRollingIsotonicCalibrator:
     ) -> Tuple[np.ndarray, np.ndarray]:
         if margins is None or labels is None:
             with self._lock:
-                m = np.fromiter(self.margins, dtype=np.float64, count=len(self.margins))
-                y = np.fromiter(self.labels, dtype=np.float64, count=len(self.labels))
+                m, y = self._snapshot_buffer()
         else:
             m = np.asarray(margins, dtype=np.float64)
             y = np.asarray(labels, dtype=np.float64)

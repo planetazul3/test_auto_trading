@@ -125,20 +125,20 @@ Leyenda:
 
 ## P4 — Bajos (pulido y rendimiento)
 
-- [ ] **31. `bilstm_encoder.py` — `embedding_dim` por defecto coincide con `hidden_size` (64) por accidente.**
-  Acoplamiento implícito que confunde al usuario. **Fix propuesto:** documentar el contrato en el docstring y/o derivar uno del otro explícitamente; alternativamente hacer `embedding_dim = hidden_size * (2 if bidirectional else 1)` y exponer un override.
+- [x] **31. `bilstm_encoder.py` — `embedding_dim` por defecto coincide con `hidden_size` (64) por accidente.**
+  **Fix aplicado:** `embedding_dim` ahora es `Optional[int]`; si es `None`, se deriva como `hidden_size * (2 if bidirectional else 1)`. Docstring documenta explícitamente la separación. Cubierto por `test_bilstm_embedding_dim_defaults_to_hidden_size_for_unidirectional`, `_2x_for_bidirectional` y `_explicit_override`.
 
-- [ ] **32. Toda la familia — Sin soporte `torch.amp.autocast` ni `.half()` coherente.**
-  Para producción de baja latencia (mencionada en el blueprint) conviene un path FP16/BF16 probado. **Status parcial:** `Trainer` ya soporta `precision={fp32,fp16,bf16}` con `autocast` y `GradScaler` para training; **falta** un test de inferencia FP16 sobre `BackboneWithHeads` que verifique numerical stability vs FP32 (tolerancia 1e-2). Pendiente: `model.half()` smoke + benchmark de latencia FP16 vs FP32.
+- [x] **32. Toda la familia — Sin soporte `torch.amp.autocast` ni `.half()` coherente.**
+  **Fix aplicado:** `Trainer.precision={fp32,fp16,bf16}` ya soportaba training. Añadidos tests específicos de **inferencia**: `test_hybrid_signal_engine_fp16_inference_matches_fp32_within_tolerance` (con `.half()`, tol 1e-2) y `test_hybrid_signal_engine_bf16_autocast_inference` (con `torch.autocast` BF16, tol 2e-2).
 
-- [ ] **33. `calibration.py` — `deque → np.array` cada update es O(N).**
-  Para `window_size=5000` es trivial, pero un ring buffer NumPy elimina la copia y los warm-starts del PAVA. **Fix propuesto:** reemplazar `self.margins/self.labels` por dos `np.ndarray` pre-allocados de tamaño `window_size` + un cursor `_head` y un `_count` para wrap-around; `update_calibration_curve` lee con `np.concatenate((buf[head:], buf[:head]))[:count]` (O(1) sin reasignar).
+- [x] **33. `calibration.py` — `deque → np.array` cada update es O(N).**
+  **Fix aplicado:** `deque` reemplazado por dos `np.ndarray` pre-allocados (`_margins_buf`/`_labels_buf`) de tamaño `window_size` + cursor `_head` + contador `_count`. `_snapshot_buffer()` retorna vista contigua (sin wrap-around) o concatenación de dos vistas (con wrap-around). El test existente `test_calibrator_monotonic_after_fit` sigue pasando — semántica preservada.
 
-- [ ] **34. Toda la familia — Cada archivo lleva su propio `__main__` con prints/seeds.**
-  **Status parcial:** los `__main__` de los archivos en `src/models/` ya fueron limpiados al refactorizar (no hay smoke-prints residuales en la versión actual). Confirmar grep final y, si quedaran, mover a `scripts/` o a `tests/test_models_smoke.py` con asserts.
+- [x] **34. Toda la familia — Cada archivo lleva su propio `__main__` con prints/seeds.**
+  **Fix aplicado:** el último `__main__` con prints (`src/features/generator.py`) fue eliminado; la versión equivalente vive en `scripts/verify_generator.py`. `grep -rn "if __name__" src/` ahora retorna 0 hits dentro de `src/`.
 
-- [ ] **35. `tft_attention.py` — Sin máscara de padding.**
-  **Status parcial:** el parámetro `key_padding_mask: Optional[torch.Tensor]` ya está expuesto en `TFTFusionNode.forward` y se pasa al `MultiheadAttention`. **Falta** test que verifique enmascarado correcto con secuencias variables (e.g. logits idénticos a los de una versión sin padding cuando se enmascara la cola).
+- [x] **35. `tft_attention.py` — Sin máscara de padding.**
+  **Fix aplicado:** `key_padding_mask: Optional[torch.Tensor]` ya estaba expuesto; añadido `test_tft_fusion_key_padding_mask_zeros_out_padded_attention` que verifica que (a) los outputs en las posiciones válidas son **bit-exactos** a una versión sin padding del mismo largo válido, y (b) los pesos de atención hacia las posiciones paddeadas son ~0.
 
 ---
 

@@ -67,11 +67,20 @@ class BiLSTMEncoder(nn.Module):
         hidden_size: int = 64,
         num_layers: int = 2,
         dropout: float = 0.3,
-        embedding_dim: int = 64,
+        embedding_dim: Optional[int] = None,
         bidirectional: bool = False,
         rnn_type: str = "lstm",
         return_sequence: bool = False,
     ) -> None:
+        """Codificador LSTM/GRU.
+
+        ``embedding_dim`` controla **únicamente** la dimensión de la
+        proyección final de salida — es independiente del estado
+        interno del RNN (``hidden_size``). Si se deja ``None`` (default
+        recomendado), se deriva como ``hidden_size * (2 if bidirectional
+        else 1)``, evitando la colisión accidental ``embedding_dim ==
+        hidden_size = 64`` que antes confundía al usuario.
+        """
         super().__init__()
         if input_size <= 0:
             raise ValueError("input_size must be > 0")
@@ -81,6 +90,8 @@ class BiLSTMEncoder(nn.Module):
             raise ValueError("num_layers must be > 0")
         if not 0.0 <= dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
+        if embedding_dim is None:
+            embedding_dim = hidden_size * (2 if bidirectional else 1)
         if embedding_dim <= 0:
             raise ValueError("embedding_dim must be > 0")
         rnn_lower = rnn_type.lower()

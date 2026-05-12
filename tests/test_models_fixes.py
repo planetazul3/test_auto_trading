@@ -302,6 +302,108 @@ def test_signal_policy_rejects_inconsistent_thresholds() -> None:
         SignalPolicy(call_threshold=0.4, put_threshold=0.5)
 
 
+# ---------------------------------------------------------------------------
+# P4.31 — desacoplo embedding_dim ↔ hidden_size
+# ---------------------------------------------------------------------------
+
+
+def test_bilstm_embedding_dim_defaults_to_hidden_size_for_unidirectional() -> None:
+    enc = BiLSTMEncoder(input_size=8, hidden_size=32, bidirectional=False)
+    out = enc(torch.randn(2, 6, 8))
+    # Default desacoplado: embedding_dim = hidden_size para unidireccional.
+    assert out.shape == (2, 32)
+
+
+def test_bilstm_embedding_dim_defaults_to_2x_for_bidirectional() -> None:
+    enc = BiLSTMEncoder(input_size=8, hidden_size=16, bidirectional=True)
+    out = enc(torch.randn(2, 6, 8))
+    # Bidirectional → embedding_dim default = hidden_size * 2.
+    assert out.shape == (2, 32)
+
+
+def test_bilstm_embedding_dim_explicit_override() -> None:
+    enc = BiLSTMEncoder(input_size=8, hidden_size=16, embedding_dim=64)
+    assert enc(torch.randn(2, 6, 8)).shape == (2, 64)
+
+
+# ---------------------------------------------------------------------------
+# P4.32 — FP16/BF16 inference numerical stability
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_signal_engine_fp16_inference_matches_fp32_within_tolerance() -> None:
+    """``.half()`` debe producir logits cercanos a FP32 dentro de tolerancia."""
+    torch.manual_seed(0)
+    engine = HybridSignalEngine(
+        num_features=4, sequence_length=8, embedding_dim=16
+    ).eval()
+    x = torch.randn(3, 8, 4)
+    out_fp32 = engine.extract_features(x, as_numpy=False)["logits"]
+
+    engine_fp16 = HybridSignalEngine(
+        num_features=4, sequence_length=8, embedding_dim=16
+    ).eval()
+    engine_fp16.load_state_dict(engine.state_dict())
+    engine_fp16 = engine_fp16.half()
+    out_fp16 = engine_fp16.extract_features(x.half(), as_numpy=False)["logits"]
+
+    torch.testing.assert_close(
+        out_fp16.float(), out_fp32, rtol=1e-2, atol=1e-2,
+    )
+
+
+def test_hybrid_signal_engine_bf16_autocast_inference() -> None:
+    """``torch.autocast(bf16)`` produce logits cercanos a FP32."""
+    torch.manual_seed(0)
+    engine = HybridSignalEngine(
+        num_features=4, sequence_length=8, embedding_dim=16
+    ).eval()
+    x = torch.randn(3, 8, 4)
+    out_fp32 = engine.extract_features(x, as_numpy=False)["logits"]
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out_bf16 = engine.extract_features(x, as_numpy=False)["logits"]
+    torch.testing.assert_close(
+        out_bf16.float(), out_fp32, rtol=2e-2, atol=2e-2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P4.35 — key_padding_mask con secuencias de longitud variable
+# ---------------------------------------------------------------------------
+
+
+def test_tft_fusion_key_padding_mask_zeros_out_padded_attention() -> None:
+    """Con ``key_padding_mask=True`` en la cola, los tokens válidos del head
+    no atienden a las posiciones paddeadas (peso = 0) y los logits resultan
+    idénticos a una secuencia "limpia" del mismo largo válido."""
+    torch.manual_seed(0)
+    fusion = TFTFusionNode(
+        embedding_dim=16, num_heads=4, num_sources=2, output_dim=16,
+        average_attn_weights=False,
+    ).eval()
+
+    # Secuencia base de largo 6.
+    a_full = torch.randn(1, 6, 16)
+    b_full = torch.randn(1, 6, 16)
+
+    # Versión paddeada: alarga a 8 con ruido + máscara que oculta las posiciones 6 y 7.
+    a_pad = torch.cat([a_full, torch.randn(1, 2, 16) * 1000.0], dim=1)
+    b_pad = torch.cat([b_full, torch.randn(1, 2, 16) * 1000.0], dim=1)
+    kpm = torch.zeros(1, 8, dtype=torch.bool)
+    kpm[0, 6:] = True
+
+    out_full, attn_full = fusion([a_full, b_full])
+    out_pad, attn_pad = fusion([a_pad, b_pad], key_padding_mask=kpm)
+
+    # Los primeros 6 outputs deben coincidir bit-a-bit con la versión sin padding.
+    torch.testing.assert_close(out_full, out_pad[:, :6], rtol=1e-4, atol=1e-4)
+    # Pesos de atención hacia las posiciones paddeadas deben ser ~0.
+    assert attn_pad.shape == (1, 4, 8, 8)
+    pad_attention = attn_pad[..., 6:]
+    assert pad_attention.abs().max().item() < 1e-5
+
+
 def test_hybrid_signal_engine_generate_signal_returns_full_payload() -> None:
     engine = HybridSignalEngine(num_features=3, sequence_length=6, embedding_dim=8)
     out = engine.generate_signal(
