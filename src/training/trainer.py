@@ -252,24 +252,34 @@ class Trainer:
             n_batches += 1
 
             if (step + 1) % accum == 0:
-                if cfg.grad_clip_norm is not None:
-                    if self.scaler is not None:
-                        self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), cfg.grad_clip_norm
-                    )
-                if self.scaler is not None:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    self.optimizer.step()
-                self.optimizer.zero_grad(set_to_none=True)
-                if self.scheduler is not None:
-                    self.scheduler.step()
-                self.state.global_step += 1
+                self._optimizer_step(cfg)
+
+        # Flush trailing accumulated grads cuando ``len(train_loader) % accum != 0``.
+        # Sin esto, las últimas ``len(train_loader) % accum`` micro-batches
+        # contribuirían al .backward() pero nunca a .step() — desperdiciando
+        # datos y des-sincronizando el global_step del scheduler.
+        if (step + 1) % accum != 0:
+            self._optimizer_step(cfg)
 
         avg = running_loss / max(1, n_batches)
         return {"train_loss": avg}
+
+    def _optimizer_step(self, cfg) -> None:
+        if cfg.grad_clip_norm is not None:
+            if self.scaler is not None:
+                self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), cfg.grad_clip_norm
+            )
+        if self.scaler is not None:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.scheduler is not None:
+            self.scheduler.step()
+        self.state.global_step += 1
 
     @torch.no_grad()
     def validate(self) -> dict[str, float]:

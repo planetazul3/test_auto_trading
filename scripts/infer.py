@@ -31,7 +31,6 @@ import logging
 import sys
 from collections import deque
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -176,28 +175,62 @@ def _feature_builder_for(style: str) -> "object":
     )
 
 
-def _row_from_message(style: str, msg: dict) -> Optional[dict]:
-    """Extrae una fila ``DataFrame``-able del payload Deriv."""
+def _rows_from_message(style: str, msg: dict) -> list[dict]:
+    """Extrae filas ``DataFrame``-ables del payload Deriv.
+
+    Devuelve **lista** porque ``ticks_history_stream`` emite:
+      * Un primer payload **snapshot** con ``history`` (ticks) o
+        ``candles`` (OHLC) — varias filas.
+      * Updates streaming con ``tick`` o ``ohlc`` — una fila por mensaje.
+
+    Antes esta función sólo leía ``ohlc``/``tick`` y descartaba la
+    snapshot inicial, lo que retrasaba el primer signal hasta ~1 hora
+    para ventanas largas (e.g. window=60, granularity=60s). Ahora
+    parsea ambos formatos y devuelve todas las filas que estén
+    disponibles en el mensaje.
+    """
     if style == "ticks":
+        # Snapshot inicial: ``history = {"prices": [...], "times": [...]}``.
+        hist = msg.get("history")
+        if hist and "prices" in hist and "times" in hist:
+            prices = hist["prices"]
+            times = hist["times"]
+            return [
+                {"epoch": int(t), "quote": float(p), "bid": float(p), "ask": float(p)}
+                for t, p in zip(times, prices)
+            ]
         tick = msg.get("tick")
         if tick is None:
-            return None
-        return {
+            return []
+        return [{
             "epoch": int(tick["epoch"]),
             "quote": float(tick["quote"]),
             "bid": float(tick.get("bid", tick["quote"])),
             "ask": float(tick.get("ask", tick["quote"])),
-        }
+        }]
+    # candles
+    candles = msg.get("candles")
+    if candles:
+        return [
+            {
+                "epoch": int(c["epoch"]),
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
+            }
+            for c in candles
+        ]
     ohlc = msg.get("ohlc")
     if ohlc is None:
-        return None
-    return {
+        return []
+    return [{
         "epoch": int(ohlc["epoch"]),
         "open": float(ohlc["open"]),
         "high": float(ohlc["high"]),
         "low": float(ohlc["low"]),
         "close": float(ohlc["close"]),
-    }
+    }]
 
 
 async def run_inference(args: argparse.Namespace) -> None:
@@ -228,7 +261,12 @@ async def run_inference(args: argparse.Namespace) -> None:
     buffer: deque[dict] = deque(maxlen=args.window_size + max(args.horizons) + 10)
     iterations = 0
 
-    async with DerivWebSocketClient(app_id=args.app_id, endpoint=args.endpoint) as ws:
+    # ``DerivWebSocketClient(url, ...)`` espera un URL completo. El app_id
+    # viaja como query string per Deriv API v2: ``...?app_id=XXXX&l=EN``.
+    base_url = args.endpoint.rstrip("/")
+    separator = "&" if "?" in base_url else "?"
+    ws_url = f"{base_url}{separator}app_id={args.app_id}&l=EN"
+    async with DerivWebSocketClient(ws_url) as ws:
         stream = ws.ticks_history_stream(
             args.symbol,
             style=args.style,
@@ -236,11 +274,19 @@ async def run_inference(args: argparse.Namespace) -> None:
             count=args.window_size + 30,
             end="latest",
         )
+        seen_epochs: set[int] = set()
         async for msg in stream:
-            row = _row_from_message(args.style, msg)
-            if row is None:
+            rows = _rows_from_message(args.style, msg)
+            new_rows = []
+            for row in rows:
+                # Dedup: snapshot inicial puede solaparse con primeros updates streaming.
+                if row["epoch"] in seen_epochs:
+                    continue
+                seen_epochs.add(row["epoch"])
+                new_rows.append(row)
+            if not new_rows:
                 continue
-            buffer.append(row)
+            buffer.extend(new_rows)
             if len(buffer) < args.window_size:
                 continue
 
