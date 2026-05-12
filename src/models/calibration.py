@@ -104,6 +104,10 @@ class LowLatencyRollingIsotonicCalibrator:
         self._lock = threading.Lock()
         # Guarda race-free: se chequea/setea bajo el mismo lock.
         self._update_in_progress = False
+        # Permite a los caller esperar el fin de un refit en background
+        # sin polling. Empieza setteado ("nada en vuelo").
+        self._update_done = threading.Event()
+        self._update_done.set()
 
     # ------------------------------------------------------------------
     # Buffer
@@ -183,12 +187,14 @@ class LowLatencyRollingIsotonicCalibrator:
     def update_in_background(self) -> bool:
         """Spawna refit en thread. Race-free: si ya hay uno corriendo, no-op.
 
-        Devuelve ``True`` si se spawnó un nuevo thread.
+        Devuelve ``True`` si se spawnó un nuevo thread. Los tests/caller
+        pueden esperar a su finalización con ``wait_update_done()``.
         """
         with self._lock:
             if self._update_in_progress:
                 return False
             self._update_in_progress = True
+            self._update_done.clear()
 
         def _target() -> None:
             try:
@@ -196,9 +202,15 @@ class LowLatencyRollingIsotonicCalibrator:
             finally:
                 with self._lock:
                     self._update_in_progress = False
+                self._update_done.set()
 
         threading.Thread(target=_target, daemon=True).start()
         return True
+
+    def wait_update_done(self, timeout: float | None = None) -> bool:
+        """Bloquea hasta que el refit en background termine (o se cumpla
+        el timeout). Devuelve ``True`` si terminó, ``False`` si timeout."""
+        return self._update_done.wait(timeout=timeout)
 
     # ------------------------------------------------------------------
     # Inferencia

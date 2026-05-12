@@ -54,8 +54,10 @@ from src.data.store_adapter import StoreView
 from src.models.calibration_bundle import PerContractCalibratorBundle
 from src.models.composite import build_model_from_config
 from src.models.conditioning import AssetTimeframeEmbedding
+from src.models.conformal import ConformalBundle
 from src.models.ensemble import SignalPolicy
 from src.models.heads import HeadConfig
+from src.risk import RiskConfig, RiskManager
 from src.training.config import (
     DataConfig,
     DeviceConfig,
@@ -120,6 +122,18 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--strong-call-threshold", type=float, default=0.80)
     p.add_argument("--strong-put-threshold", type=float, default=0.20)
 
+    # Risk manager (A3)
+    p.add_argument("--max-drawdown", type=float, default=None,
+                   help="kill-switch absoluto si DD >= valor; None = sin límite")
+    p.add_argument("--max-daily-loss", type=float, default=None)
+    p.add_argument("--max-trades-per-day", type=int, default=None)
+    p.add_argument("--max-concurrent-exposure", type=float, default=None)
+
+    # Conformal gate (B3)
+    p.add_argument("--conformal-alpha", type=float, default=None,
+                   help="si se especifica, se aplica un ConformalBundle gate "
+                        "(en walk-forward se calibra sobre val)")
+
     p.add_argument("--output", type=str, default=None, help="ruta a JSON con métricas")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-level", type=str, default="INFO")
@@ -162,6 +176,33 @@ def _build_backtest_cfg(args: argparse.Namespace) -> BacktestConfig:
         commission=args.commission,
         base_stake=args.base_stake,
         batch_size=args.batch_size,
+    )
+
+
+def _maybe_build_risk_manager(args: argparse.Namespace) -> RiskManager | None:
+    if (
+        args.max_drawdown is None
+        and args.max_daily_loss is None
+        and args.max_trades_per_day is None
+        and args.max_concurrent_exposure is None
+    ):
+        return None
+    return RiskManager(RiskConfig(
+        max_drawdown=args.max_drawdown,
+        max_daily_loss=args.max_daily_loss,
+        max_trades_per_day=args.max_trades_per_day,
+        max_concurrent_exposure=args.max_concurrent_exposure,
+    ))
+
+
+def _maybe_build_conformal_gate(args: argparse.Namespace) -> ConformalBundle | None:
+    if args.conformal_alpha is None:
+        return None
+    return ConformalBundle(
+        contracts=tuple(args.contracts),
+        horizons=tuple(args.horizons),
+        alpha=args.conformal_alpha,
+        min_observations=20,
     )
 
 
@@ -311,6 +352,8 @@ def _run_static(args: argparse.Namespace) -> dict:
             policy=_build_policy(args),
             config=_build_backtest_cfg(args),
             device=device,
+            conformal_gate=_maybe_build_conformal_gate(args),
+            risk_manager=_maybe_build_risk_manager(args),
         )
         result = engine.run(dataset)
     finally:

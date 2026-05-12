@@ -150,11 +150,8 @@ def test_calibrator_update_in_background_is_race_free() -> None:
         t.join()
     # Como máximo uno spawneó el refit; los demás deben devolver False.
     assert sum(1 for s in spawned if s) <= 1
-    # Tras esperar a que termine, la curva debería quedar consistente.
-    for _ in range(50):
-        if not cal._update_in_progress:  # type: ignore[attr-defined]
-            break
-        threading.Event().wait(0.05)
+    # Esperar al fin del refit (timeout generoso para entornos lentos / JIT).
+    assert cal.wait_update_done(timeout=30.0), "background update did not finish"
     cal.update_calibration_curve()  # asegura un fit completo terminado
     assert cal.is_fitted
 

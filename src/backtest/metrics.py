@@ -97,6 +97,10 @@ def sortino_ratio(returns: np.ndarray, *, risk_free: float = 0.0) -> float:
     downside = excess[excess < 0]
     if downside.size == 0:
         return float("inf") if np.mean(excess) > 0 else 0.0
+    # ``ddof=1`` requiere ``size >= 2``; con un único downside no hay
+    # dispersión definida → devolvemos 0 conservadoramente.
+    if downside.size < 2:
+        return 0.0
     downside_std = float(np.std(downside, ddof=1))
     return _safe_div(float(np.mean(excess)), downside_std)
 
