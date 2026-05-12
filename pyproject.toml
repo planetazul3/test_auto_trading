@@ -6,7 +6,10 @@ authors = [
     { name = "AI Quant", email = "quant@example.com" }
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+# Soportamos Python 3.11+ para CI matrix. Las wheels de pandas-ta sólo
+# existen en 3.12+, por eso vive en el extra opcional `legacy-features`
+# y no en las dependencias core.
+requires-python = ">=3.11"
 license = { text = "Proprietary" }
 keywords = [
     "quantitative-trading",
@@ -23,14 +26,14 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-# Dependencias estrictas para el motor de señales en producción
+# Dependencias estrictas del motor de señales en producción (3.11 + 3.12).
+# pandas-ta vive en el grupo opcional `legacy-features` porque sólo
+# publica wheels para Python ≥3.12.
 dependencies = [
     # Deep Learning & series temporales
     "torch>=2.2.1,<2.5.0",
     # Ensamble de árboles
     "xgboost>=2.0.3,<2.1.0",
-    # Feature engineering financiero
-    "pandas-ta>=0.3.14b0,<0.4.0",
     # Calibración de probabilidades (baja latencia)
     "numba>=0.59.0,<0.60.0",
     "scikit-learn>=1.4.1,<1.5.0",
@@ -47,6 +50,13 @@ Repository = "https://github.com/quantforge/ml-signal-engine"
 Documentation = "https://quantforge.github.io/ml-signal-engine"
 
 [project.optional-dependencies]
+# Feature engineering legacy (FeatureGenerator basado en pandas-ta).
+# pandas-ta sólo tiene wheels para Python ≥3.12; en 3.11 los tests
+# dependientes se auto-skipean via tests/conftest.py.
+legacy-features = [
+    "pandas-ta>=0.3.14b0,<0.4.0",
+]
+
 # Herramientas de análisis/interpretabilidad (no se incluyen en runtime de producción)
 analysis = [
     "shap>=0.45.0,<0.46.0",
@@ -79,6 +89,35 @@ experiment = [
     "mlflow>=2.11.1,<2.12.0",
 ]
 
+# Training: DDP-aware Trainer + multi-contract loss + DuckDB-backed datasets.
+training = [
+    "torch>=2.2.1,<2.5.0",
+    "duckdb>=0.10.0,<2.0.0",
+]
+
+# Hyperparameter tuning con Optuna (G grupo del audit tracking)
+tuning = [
+    "optuna>=3.6,<5.0",
+]
+
+# Backtester walk-forward + métricas
+backtest = [
+    "torch>=2.2.1,<2.5.0",
+    "duckdb>=0.10.0,<2.0.0",
+]
+
+# Serving / inferencia en vivo contra Deriv WebSocket
+serving = [
+    "torch>=2.2.1,<2.5.0",
+    "websockets>=12.0,<14.0",
+    "httpx>=0.27.0,<0.28.0",
+]
+
+# Stack completo (todo, excepto bridge MT5/zmq)
+full = [
+    "ml-signal-engine[deriv-ingest,training,tuning,backtest,serving,analysis,experiment]",
+]
+
 # Desarrollo y CI/CD
 dev = [
     "pytest>=8.1.1,<8.2.0",
@@ -88,6 +127,11 @@ dev = [
     "mypy>=1.8.0,<1.9.0",
     "pre-commit>=3.6.0",
     "pip-tools>=7.3.0",
+    # Para correr los tests nuevos: el suite real depende de torch+optuna+duckdb.
+    "torch>=2.2.1,<2.5.0",
+    "duckdb>=0.10.0,<2.0.0",
+    "optuna>=3.6,<5.0",
+    "websockets>=12.0,<14.0",
 ]
 
 [build-system]
@@ -96,7 +140,16 @@ build-backend = "hatchling.build"
 
 # Configuración del layout de fuente (estándar src)
 [tool.hatch.build.targets.wheel]
-packages = ["src/features", "src/models", "src/utils", "src/connectors"]
+packages = [
+    "src/features",
+    "src/models",
+    "src/utils",
+    "src/connectors",
+    "src/data",
+    "src/training",
+    "src/backtest",
+    "src/risk",
+]
 
 [tool.hatch.build]
 include = [

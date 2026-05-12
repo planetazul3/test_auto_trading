@@ -1,10 +1,16 @@
 """
 Generador de 120+ features técnicas, de volumen, microestructura y régimen.
 Versión 2.0: sin data leakage por backward fill, ffill estricto para respear orden temporal.
+
+NOTA: este módulo depende de ``pandas-ta`` que sólo publica wheels para
+Python ≥3.12. En 3.11 el import falla con ``ModuleNotFoundError`` y los
+consumidores deben usar ``src.data.features.CandleFeatureBuilder`` que
+cubre el mismo caso de uso sin la dependencia. Los tests legacy se
+auto-skipean via ``tests/conftest.py``.
 """
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+import pandas_ta as ta  # requires-python: 3.12+ via wheels; instalar con [legacy-features]
 from numba import njit
 from sklearn.mixture import GaussianMixture
 import warnings

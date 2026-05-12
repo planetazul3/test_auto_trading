@@ -180,8 +180,25 @@ Leyenda:
 - [ ] **E3.** Trazas OpenTelemetry desde `generate_signal`.
 
 ### CI / dev experience
-- [ ] **F1.** `pyproject.toml` extras: `[dev]`, `[training]`, `[serving]` con sus deps.
-- [ ] **F2.** GitHub Actions con matrix Python 3.11/3.12 (3.12 sí tiene `pandas-ta`).
+- [x] **F1. `pyproject.toml` extras.** Nuevos grupos opcionales:
+  - `training` — torch + duckdb
+  - `tuning` — optuna ≥3.6
+  - `backtest` — torch + duckdb
+  - `serving` — torch + websockets + httpx
+  - `legacy-features` — pandas-ta (movido fuera del core porque sólo tiene wheels para Py 3.12+)
+  - `full` — meta-extra que une los anteriores
+  - `dev` ampliado con torch, duckdb, optuna, websockets
+  - `requires-python` bajado de `>=3.12` a `>=3.11` (con la salvedad documentada)
+  - `[tool.hatch.build.targets.wheel].packages` ampliado con `src/data`, `src/training`, `src/backtest`, `src/risk`
+- [x] **F2. GitHub Actions con matrix Python 3.11 / 3.12.** `.github/workflows/test.yml` con:
+  - Job `pytest` matrix:
+    - **3.11**: extras `dev,deriv-ingest,training,tuning,backtest,serving` (sin pandas-ta; `conftest.py` auto-skipea los tests legacy).
+    - **3.12**: extras anteriores + `legacy-features,analysis` (suite completa incl. `test_feature_generator` + `test_integrity`).
+  - Verificación de imports antes de correr tests (catch errores de empaquetado).
+  - `pytest -W error` para tratar warnings como errores.
+  - Upload de pytest cache en failure.
+  - Job `lint` con `ruff==0.1.15` sobre `src/ tests/ scripts/`.
+  - `concurrency` cancela jobs viejos al pushear.
 - [ ] **F3.** Pre-commit hooks (ruff + mypy strict en `src/`).
 - [ ] **F4.** Benchmarks de latencia de `generate_signal` (target p99 < 5ms en CPU).
 
