@@ -160,9 +160,9 @@ Leyenda:
 - [ ] **A3. Risk manager**: límite por contrato/símbolo/régimen, kill-switch por drawdown, exposure cap.
 
 ### Calibración / post-procesado
-- [ ] **B1.** Calibrador **por contrato** (no único): un `LowLatencyRollingIsotonicCalibrator` por cada cabezal de `MultiContractMultiHorizonHead`.
+- [x] **B1.** Calibrador **por contrato** *(entregado en `5640462`)* — `PerContractCalibratorBundle` mantiene una `LowLatencyRollingIsotonicCalibrator` por `(contract, horizon)` con add/calibrate vectorizado, `state_dict` round-trip y `quality_report()` (Brier + ECE por celda).
 - [ ] **B2.** Re-calibración online del modelo (auto-trigger por drift de Brier/ECE).
-- [ ] **B3.** Conformal prediction encima del cabezal CALL/PUT para garantizar coverage.
+- [x] **B3. Conformal prediction encima del cabezal CALL/PUT.** `src/models/conformal.py`: `InductiveConformalPredictor` (ICP binario con score `1 - p̂(y|x)`, ring buffer adaptativo, quantile cacheado) + `ConformalBundle` paralelo al calibrador con API vectorizada `(B,C,H)→(B,C,H,2)`. Integrado en `BacktestEngine.conformal_gate`: cuando el set conformal no es `{0}` ni `{1}`, la celda se fuerza a NO_TRADE (preserva la garantía marginal de coverage ≥1-α). 14 tests cubriendo: properties del set (singleton/ambivalent/empty), validación, coverage empírico ≥ 1-α en datos sintéticos, monotonicidad respecto a α, ring buffer wrap-around, bundle vectorizado y dos escenarios end-to-end con backtester (gate ambivalente forcing NO_TRADE vs gate calibrado dejando pasar señales).
 
 ### Entrenamiento end-to-end
 - [ ] **C1.** Script `scripts/train.py` que: carga `TrainingConfig` desde YAML/JSON → instancia `WindowDataset` (multi-symbol vía `ConcatDataset`) → backbone + cabezales + embedding → `Trainer.fit()` → escribe el mejor checkpoint a disco.

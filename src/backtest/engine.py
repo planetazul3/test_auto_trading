@@ -40,6 +40,7 @@ from torch.utils.data import DataLoader, Dataset
 from src.data.dataset import collate_window_samples
 from src.data.labels import IGNORE_LABEL
 from src.models.calibration_bundle import PerContractCalibratorBundle
+from src.models.conformal import ConformalBundle
 from src.models.ensemble import SignalPolicy
 
 
@@ -146,6 +147,8 @@ class BacktestEngine:
         policy: Optional[SignalPolicy] = None,
         config: Optional[BacktestConfig] = None,
         device: Optional[torch.device] = None,
+        conformal_gate: Optional[ConformalBundle] = None,
+        risk_manager: Optional["object"] = None,
     ) -> None:
         if len(contracts) == 0 or len(horizons) == 0:
             raise ValueError("contracts and horizons must be non-empty")
@@ -156,6 +159,8 @@ class BacktestEngine:
         self.policy = policy or SignalPolicy()
         self.config = config or BacktestConfig()
         self.device = device or _model_device(model)
+        self.conformal_gate = conformal_gate
+        self.risk_manager = risk_manager
 
     # ------------------------------------------------------------------
     # Run
@@ -198,6 +203,13 @@ class BacktestEngine:
         # Calibrar: si el bundle aún no tiene curvas, usa sigmoid neutro.
         probs = self.calibrator.calibrate(logits_np)
 
+        # Filtro conformal opcional: si el set conformal no es {0} ni {1}
+        # (ambivalente o vacío), la celda se fuerza a NO_TRADE.
+        if self.conformal_gate is not None:
+            conformal_confident = self.conformal_gate.is_confident(probs)
+        else:
+            conformal_confident = None
+
         for bi in range(logits_np.shape[0]):
             for ci, contract in enumerate(self.contracts):
                 for hi, horizon in enumerate(self.horizons):
@@ -205,10 +217,39 @@ class BacktestEngine:
                     label_val = int(labels[bi, ci, hi])
                     is_masked = (not bool(mask[bi, ci, hi])) or label_val == IGNORE_LABEL
                     signal, sizing = _classify(p, self.policy)
+                    # Conformal gate: derribar señales sin coverage garantizado.
+                    if conformal_confident is not None and not bool(
+                        conformal_confident[bi, ci, hi]
+                    ):
+                        signal, sizing = "NO_TRADE", self.policy.no_trade_sizing
+                    # Risk manager opcional: ajustar sizing o forzar NO_TRADE.
+                    if self.risk_manager is not None and signal != "NO_TRADE":
+                        decision = self.risk_manager.evaluate(
+                            contract=contract,
+                            horizon=int(horizon),
+                            signal=signal,
+                            base_stake=self.config.base_stake,
+                            sizing=sizing,
+                            epoch=int(epochs[bi]),
+                        )
+                        if not decision.allow:
+                            signal, sizing = "NO_TRADE", self.policy.no_trade_sizing
+                        else:
+                            sizing = decision.adjusted_sizing
                     pnl = self._resolve_pnl(signal, sizing, label_val, is_masked)
                     if is_masked and self.config.skip_masked_labels and signal != "NO_TRADE":
                         # Trade que apuntaba a una label inválida → skip (no entra).
                         continue
+                    # Notificar al risk manager del PnL realizado para que
+                    # actualice su estado interno (drawdown, exposure, etc).
+                    if self.risk_manager is not None and signal != "NO_TRADE":
+                        self.risk_manager.record_trade(
+                            contract=contract,
+                            horizon=int(horizon),
+                            signal=signal,
+                            pnl=pnl,
+                            epoch=int(epochs[bi]),
+                        )
                     yield TradeEvent(
                         epoch=int(epochs[bi]),
                         contract=contract,
