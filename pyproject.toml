@@ -100,6 +100,13 @@ tuning = [
     "optuna>=3.6,<5.0",
 ]
 
+# Observabilidad: métricas Prometheus (E2 del audit tracking).
+# La capa src/observability degrada a no-op si esta dep no está, así
+# que es realmente opcional.
+observability = [
+    "prometheus-client>=0.20,<1.0",
+]
+
 # Backtester walk-forward + métricas
 backtest = [
     "torch>=2.2.1,<2.5.0",

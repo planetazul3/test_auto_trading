@@ -161,7 +161,7 @@ Leyenda:
 
 ### Calibración / post-procesado
 - [x] **B1.** Calibrador **por contrato** *(entregado en `5640462`)* — `PerContractCalibratorBundle` mantiene una `LowLatencyRollingIsotonicCalibrator` por `(contract, horizon)` con add/calibrate vectorizado, `state_dict` round-trip y `quality_report()` (Brier + ECE por celda).
-- [ ] **B2.** Re-calibración online del modelo (auto-trigger por drift de Brier/ECE).
+- [x] **B2. Re-calibración online auto-trigger por drift de Brier/ECE.** `src/models/drift.py`: `OnlineCalibrationMonitor` con umbrales `max_brier`, `max_ece`, `min_observations`, **hysteresis** vía `recovery_margin` (una celda en alerta vuelve a OK sólo si su métrica cae a/por debajo de `threshold - recovery_margin`) y **cooldown** entre refits (`cooldown_seconds` medido con el `epoch` que pasa el caller para mantener determinismo). API: `check(bundle, now_epoch) → dict[cell, DriftDecision]` y `maybe_refit(bundle, decisions, now_epoch, background=True) → int` que dispara `update_in_background`/`update_calibration_curve` sólo en las celdas marcadas y respeta el cooldown. 11 tests: validaciones, `insufficient_observations`, `ok` para bundle bien calibrado, refit en bundle mal calibrado, cooldown bloquea back-to-back, cooldown expira tras el threshold, hysteresis con tolerancia exacta a métricas en cero, refit en background con `wait_update_done`, reset.
 - [x] **B3. Conformal prediction encima del cabezal CALL/PUT.** `src/models/conformal.py`: `InductiveConformalPredictor` (ICP binario con score `1 - p̂(y|x)`, ring buffer adaptativo, quantile cacheado) + `ConformalBundle` paralelo al calibrador con API vectorizada `(B,C,H)→(B,C,H,2)`. Integrado en `BacktestEngine.conformal_gate`: cuando el set conformal no es `{0}` ni `{1}`, la celda se fuerza a NO_TRADE (preserva la garantía marginal de coverage ≥1-α). 14 tests cubriendo: properties del set (singleton/ambivalent/empty), validación, coverage empírico ≥ 1-α en datos sintéticos, monotonicidad respecto a α, ring buffer wrap-around, bundle vectorizado y dos escenarios end-to-end con backtester (gate ambivalente forcing NO_TRADE vs gate calibrado dejando pasar señales).
 
 ### Entrenamiento end-to-end
@@ -175,8 +175,8 @@ Leyenda:
 - [ ] **D3.** Caché de features pre-computadas en Parquet (rehacer ventanas es lento si rasgamos features cada batch).
 
 ### Observabilidad
-- [ ] **E1.** Métricas Prometheus desde el Trainer (loss por step, lr, mem, throughput).
-- [ ] **E2.** Logging estructurado JSON con `correlation_id` por señal.
+- [x] **E1. Logging estructurado JSON con `correlation_id` por señal.** `src/observability/logging.py`: `JsonFormatter` que serializa cada `LogRecord` a una línea JSON estable (`ts`, `level`, `logger`, `message`, `correlation_id`, extras vía `extra={...}`, `exception`/`stack` cuando aplica); `correlation_id` como `contextvars.ContextVar` thread-safe + asyncio-safe (Python copia el contexto en task_factory por default); `configure_root(level, stream, json_format)` idempotente. 7 tests.
+- [x] **E2. Métricas Prometheus.** `src/observability/metrics.py`: wrapper import-safe sobre `prometheus_client`. `MetricsRegistry` opinado con `counter/gauge/histogram` factory de-duplicado por nombre; **si `prometheus_client` no está, todo degrada a `_NoOpMetric`** silenciosa sin warnings. Métricas estándar pre-instanciadas: `inference_latency_seconds` (buckets pensados para target p99 < 5ms), `train_batch_duration_seconds`, `train_loss` (labels stage+contract), `signals_emitted_total` (signal+contract). `start_http_server(port)` opcional. 5 tests (incluye fallback path simulado con monkeypatch).
 - [ ] **E3.** Trazas OpenTelemetry desde `generate_signal`.
 
 ### CI / dev experience
