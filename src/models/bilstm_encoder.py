@@ -1,174 +1,200 @@
+"""Codificador temporal LSTM/GRU con pooling de atención opcional.
+
+Diseño:
+
+* Nombre conservado por compatibilidad histórica; el default es
+  ``bidirectional=False`` para mantener causalidad estricta sobre la
+  ventana de entrada (mirar hacia atrás sería look-ahead).
+* ``rnn_type`` validado explícitamente — falla rápido si recibe valores
+  no soportados.
+* Inicialización de pesos:
+    - Xavier uniform en ``weight_ih`` (input-hidden)
+    - Orthogonal en ``weight_hh`` (hidden-hidden) — recomendado para
+      estabilidad del backprop en RNNs.
+    - Forget-gate bias inicializado a 1.0 sólo en LSTM (la ranura
+      ``[n//4:n//2]`` corresponde a ``f`` en el orden i,f,g,o de PyTorch).
+* Dropout aplicado **consistentemente** en ambas ramas
+  (``return_sequence=True/False``).
+* Soporta ``lengths`` opcional para secuencias de longitud variable
+  via ``pack_padded_sequence``.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, overload
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+
+
+_VALID_RNN_TYPES = frozenset({"lstm", "gru"})
+
 
 class AttentionPooling(nn.Module):
-    """
-    Mecanismo de atención para colapsar la dimensión temporal.
-    Permite al modelo aprender qué pasos de tiempo son más relevantes
-    para la señal final.
-    """
-    def __init__(self, hidden_dim: int):
+    """Pooling temporal por atención softmax (sin look-ahead respecto al
+    instante de inferencia: toda la ventana es ``[t-w, t]``)."""
+
+    def __init__(self, hidden_dim: int) -> None:
         super().__init__()
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be > 0")
         self.attn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.Tanh(),
-            nn.Linear(hidden_dim // 2, 1)
+            nn.Linear(hidden_dim // 2, 1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq, hidden)
-        weights = self.attn(x)  # (batch, seq, 1)
-        weights = F.softmax(weights, dim=1)
-        # Suma ponderada: (batch, hidden)
+    def forward(
+        self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        # x: (B, S, H), key_padding_mask: (B, S) con True en posiciones a enmascarar
+        scores = self.attn(x)  # (B, S, 1)
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(
+                key_padding_mask.unsqueeze(-1), float("-inf")
+            )
+        weights = F.softmax(scores, dim=1)
         return torch.sum(x * weights, dim=1)
 
-class BiLSTMEncoder(nn.Module):
-    """
-    Codificador temporal LSTM/GRU.
 
-    El nombre conserva el prefijo "Bi" por compatibilidad histórica, pero
-    ``bidirectional=False`` es el default obligatorio en el pipeline causal del
-    motor de señales: una pasada hacia atrás violaría la regla de causalidad
-    estricta del Blueprint §1.2 (look-ahead a través del futuro encoder).
-    """
-    def __init__(self, 
-                 input_size: int, 
-                 hidden_size: int = 64, 
-                 num_layers: int = 2, 
-                 dropout: float = 0.3, 
-                 embedding_dim: int = 64,
-                 bidirectional: bool = False,
-                 rnn_type: str = "lstm",
-                 return_sequence: bool = False):
-        super(BiLSTMEncoder, self).__init__()
-        
+class BiLSTMEncoder(nn.Module):
+    """Codificador LSTM/GRU configurable."""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.3,
+        embedding_dim: Optional[int] = None,
+        bidirectional: bool = False,
+        rnn_type: str = "lstm",
+        return_sequence: bool = False,
+    ) -> None:
+        """Codificador LSTM/GRU.
+
+        ``embedding_dim`` controla **únicamente** la dimensión de la
+        proyección final de salida — es independiente del estado
+        interno del RNN (``hidden_size``). Si se deja ``None`` (default
+        recomendado), se deriva como ``hidden_size * (2 if bidirectional
+        else 1)``, evitando la colisión accidental ``embedding_dim ==
+        hidden_size = 64`` que antes confundía al usuario.
+        """
+        super().__init__()
+        if input_size <= 0:
+            raise ValueError("input_size must be > 0")
+        if hidden_size <= 0:
+            raise ValueError("hidden_size must be > 0")
+        if num_layers <= 0:
+            raise ValueError("num_layers must be > 0")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if embedding_dim is None:
+            embedding_dim = hidden_size * (2 if bidirectional else 1)
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be > 0")
+        rnn_lower = rnn_type.lower()
+        if rnn_lower not in _VALID_RNN_TYPES:
+            raise ValueError(
+                f"rnn_type must be one of {sorted(_VALID_RNN_TYPES)}, "
+                f"got {rnn_type!r}"
+            )
+
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.embedding_dim = embedding_dim
         self.bidirectional = bidirectional
         self.return_sequence = return_sequence
+        self.rnn_type = rnn_lower
 
-        # Selección de celda recurrente
-        rnn_class = nn.LSTM if rnn_type.lower() == "lstm" else nn.GRU
-        
+        rnn_class = nn.LSTM if rnn_lower == "lstm" else nn.GRU
         self.rnn = rnn_class(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=bidirectional
+            bidirectional=bidirectional,
         )
 
-        # Dimensión de salida del RNN
         rnn_out_size = hidden_size * (2 if bidirectional else 1)
         self.ln_rnn = nn.LayerNorm(rnn_out_size)
-        
-        if not self.return_sequence:
-            # Mecanismo de Atención Temporal para colapsar
+
+        if not return_sequence:
             self.attention = AttentionPooling(rnn_out_size)
-            self.fc_projection = nn.Sequential(
+            self.head = nn.Sequential(
                 nn.Linear(rnn_out_size, rnn_out_size * 2),
                 nn.GELU(),
                 nn.LayerNorm(rnn_out_size * 2),
-                nn.Dropout(p=dropout),
+                nn.Dropout(dropout),
                 nn.Linear(rnn_out_size * 2, embedding_dim),
-                nn.LayerNorm(embedding_dim)
+                nn.LayerNorm(embedding_dim),
             )
+            self.step_head: Optional[nn.Module] = None
         else:
-            # Proyección por paso de tiempo
-            self.step_projection = nn.Sequential(
+            self.attention = None  # type: ignore[assignment]
+            self.head = None  # type: ignore[assignment]
+            self.step_head = nn.Sequential(
                 nn.Linear(rnn_out_size, embedding_dim),
-                nn.LayerNorm(embedding_dim)
+                nn.Dropout(dropout),
+                nn.LayerNorm(embedding_dim),
             )
-        
+
         self._init_weights()
 
-    def _init_weights(self):
-        """Inicialización robusta."""
+    def _init_weights(self) -> None:
         for name, param in self.named_parameters():
-            if 'weight_ih' in name:
+            if "weight_ih" in name:
                 nn.init.xavier_uniform_(param.data)
-            elif 'weight_hh' in name:
+            elif "weight_hh" in name:
                 nn.init.orthogonal_(param.data)
-            elif 'bias' in name:
-                nn.init.constant_(param.data, 0)
-                if 'bias_ih' in name and isinstance(self.rnn, nn.LSTM):
+            elif "bias" in name:
+                nn.init.constant_(param.data, 0.0)
+                # Forget gate bias = 1.0 sólo en LSTM (orden i,f,g,o).
+                if self.rnn_type == "lstm" and "bias_ih" in name:
                     n = param.size(0)
-                    param.data[n//4:n//2].fill_(1.0)
+                    param.data[n // 4 : n // 2].fill_(1.0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass del codificador.
-        Args:
-            x: Tensor (batch, seq, features)
-        Returns:
-            embedding: (batch, dim) o (batch, seq, dim)
-        """
+    @overload
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        lengths: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor: ...
+
+    def forward(  # type: ignore[no-redef]
+        self,
+        x: torch.Tensor,
+        *,
+        lengths: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if x.dim() != 3:
-            raise ValueError(f"Se esperaba 3D, se recibió {x.dim()}D")
+            raise ValueError(f"Expected 3D tensor (B,S,F), got {x.dim()}D")
 
-        out, _ = self.rnn(x)
-        out = self.ln_rnn(out)
-        
-        if not self.return_sequence:
-            context_vector = self.attention(out)
-            return self.fc_projection(context_vector)
+        if lengths is not None:
+            packed = nn.utils.rnn.pack_padded_sequence(
+                x, lengths.cpu(), batch_first=True, enforce_sorted=False
+            )
+            out_packed, _ = self.rnn(packed)
+            out, _ = nn.utils.rnn.pad_packed_sequence(
+                out_packed, batch_first=True, total_length=x.size(1)
+            )
         else:
-            return self.step_projection(out)
+            out, _ = self.rnn(x)
+        out = self.ln_rnn(out)
+
+        if self.return_sequence:
+            assert self.step_head is not None
+            return self.step_head(out)
+
+        assert self.attention is not None and self.head is not None
+        context = self.attention(out, key_padding_mask=key_padding_mask)
+        return self.head(context)
 
 
-if __name__ == "__main__":
-    print("Inicializando Advanced Temporal Encoder...")
-    
-    # Parámetros de prueba
-    BATCH_SIZE = 32
-    SEQ_LENGTH = 60
-    NUM_FEATURES = 125
-    HIDDEN_SIZE = 64
-    EMBEDDING_DIM = 64
-    
-    torch.manual_seed(42)
-    synthetic_input = torch.randn(BATCH_SIZE, SEQ_LENGTH, NUM_FEATURES)
-    
-    try:
-        # Instanciar modelo (Causal por defecto)
-        model = BiLSTMEncoder(
-            input_size=NUM_FEATURES,
-            hidden_size=HIDDEN_SIZE,
-            num_layers=2,
-            dropout=0.3,
-            embedding_dim=EMBEDDING_DIM,
-            bidirectional=False # Strict causality
-        )
-        
-        model.eval()
-        
-        with torch.no_grad():
-            print(f"Configuración: Causal=True, RNN=LSTM, Layers=2")
-            print(f"Input shape: {synthetic_input.shape}")
-            
-            output_embedding = model(synthetic_input)
-            
-            print(f"Output shape: {output_embedding.shape}")
-            
-            # Verificaciones
-            assert output_embedding.shape == (BATCH_SIZE, EMBEDDING_DIM)
-            assert not torch.isnan(output_embedding).any()
-            
-            print("\n[OK] Codificador avanzado ejecutado exitosamente.")
-            
-            # Prueba de JIT (TorchScript)
-            print("Verificando compatibilidad con TorchScript...")
-            scripted_model = torch.jit.script(model)
-            scripted_output = scripted_model(synthetic_input)
-            assert torch.allclose(output_embedding, scripted_output)
-            print("[OK] Modelo compatible con TorchScript para producción.")
-            
-    except Exception as e:
-        print(f"\n[ERROR] {str(e)}")
-        import traceback
-        traceback.print_exc()
+__all__ = ["AttentionPooling", "BiLSTMEncoder"]

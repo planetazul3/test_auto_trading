@@ -1,164 +1,263 @@
+"""Meta-Learner XGBoost para clasificación de regímenes de mercado.
+
+Mejoras respecto a la versión previa:
+
+* **API SHAP moderna**: maneja tanto el array 3D ``(n, f, k)`` de SHAP
+  ≥0.42 como la lista legacy por clase.
+* **CV temporal real**: ``n_splits`` se usa para construir
+  ``TimeSeriesSplit`` y reportar mlogloss cross-validado.
+* **Validación de etiquetas**: ``y`` debe contener exclusivamente los
+  valores ``{0, 1, 2}`` (no se permiten huecos).
+* **Soporte de desbalanceo**: ``class_weight='balanced'`` o pesos
+  explícitos via ``sample_weight``.
+* **Warnings locales**: nada de ``warnings.filterwarnings`` global al
+  importar el módulo.
+* **Etiquetas de régimen configurables** (no hardcoded en el ensemble).
 """
-Meta-Learner XGBoost para clasificación de regímenes de mercado.
-"""
+
+from __future__ import annotations
+
+import warnings
+from typing import Iterable, Optional, Sequence
+
 import numpy as np
 import xgboost as xgb
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.utils.class_weight import compute_sample_weight
+
 try:
     import shap
     SHAP_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - dependencia opcional
+    shap = None
     SHAP_AVAILABLE = False
-import warnings
 
-warnings.filterwarnings("ignore", message=".*is_sparse.*")
+
+DEFAULT_REGIME_LABELS: tuple[str, ...] = ("LOW_VOL", "TRENDING", "HIGH_VOL")
+
+
+def _normalize_shap_values(
+    raw, regime_idx: int, sample_idx: int
+) -> np.ndarray:
+    """Devuelve el vector SHAP ``(num_features,)`` para una muestra y clase.
+
+    Soporta:
+    * SHAP <0.42: ``list[ndarray (n,f)]`` indexado por clase.
+    * SHAP ≥0.42: ``ndarray (n, f, k)``.
+    """
+    if isinstance(raw, list):
+        return np.asarray(raw[regime_idx][sample_idx], dtype=np.float64)
+    arr = np.asarray(raw, dtype=np.float64)
+    if arr.ndim == 3:
+        return arr[sample_idx, :, regime_idx]
+    if arr.ndim == 2:
+        # Modelo binario: una única matriz (n, f).
+        return arr[sample_idx]
+    raise ValueError(f"unsupported SHAP value shape: {arr.shape}")
 
 
 class RegimeAwareMetaLearner:
-    """
-    Meta-Learner que actúa como clasificador de regímenes de mercado.
-    Usa XGBoost con salida multi-clase (3 regímenes) para rutear señales
-    y ajustar el sizing dinámicamente.
-    """
+    """Clasificador XGBoost multi-clase (3 regímenes) con SHAP opcional."""
 
-    def __init__(self, random_state: int = 42, n_splits: int = 3):
-        """
-        Configuración multi-clase para 3 regímenes:
-        0: Low Volatility / Mean Reversion
-        1: Trending / Momentum
-        2: High Volatility / Crash-Risk
-        """
+    def __init__(
+        self,
+        *,
+        random_state: int = 42,
+        n_splits: int = 3,
+        n_estimators: int = 150,
+        learning_rate: float = 0.05,
+        max_depth: int = 4,
+        n_jobs: int = -1,
+        regime_labels: Sequence[str] = DEFAULT_REGIME_LABELS,
+        class_weight: Optional[str | dict[int, float]] = None,
+    ) -> None:
+        if n_splits < 2:
+            raise ValueError("n_splits must be >= 2 for TimeSeriesSplit")
+        if len(regime_labels) != 3:
+            raise ValueError("regime_labels must contain exactly 3 entries")
         self.random_state = random_state
         self.n_splits = n_splits
+        self.regime_labels: tuple[str, ...] = tuple(regime_labels)
+        self.class_weight = class_weight
 
         self.model = xgb.XGBClassifier(
-            n_estimators=150,
-            learning_rate=0.05,
-            max_depth=4,
-            objective='multi:softprob',
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            objective="multi:softprob",
             num_class=3,
-            eval_metric='mlogloss',
-            random_state=self.random_state,
-            n_jobs=-1
+            eval_metric="mlogloss",
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
+        self.is_fitted = False
+        self.explainer: Optional["shap.TreeExplainer"] = None
+        self.cv_mlogloss_: Optional[np.ndarray] = None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_labels(y: np.ndarray) -> None:
+        if y.ndim != 1:
+            raise ValueError("y must be 1-D")
+        valid = {0, 1, 2}
+        actual = set(np.unique(y).tolist())
+        if not actual.issubset(valid):
+            raise ValueError(
+                f"y must contain only labels in {sorted(valid)}; got {sorted(actual)}"
+            )
+
+    def _compute_sample_weight(
+        self, y: np.ndarray, sample_weight: Optional[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        if sample_weight is not None:
+            sw = np.asarray(sample_weight, dtype=np.float64)
+            if sw.shape != y.shape:
+                raise ValueError("sample_weight must match y shape")
+            return sw
+        if self.class_weight is None:
+            return None
+        if self.class_weight == "balanced":
+            return compute_sample_weight("balanced", y)
+        if isinstance(self.class_weight, dict):
+            return np.array([float(self.class_weight[int(c)]) for c in y])
+        raise ValueError(
+            "class_weight must be None, 'balanced' or a dict[int, float]"
         )
 
-        self.is_fitted = False
-        self.explainer = None
+    # ------------------------------------------------------------------
+    # Fit / predict
+    # ------------------------------------------------------------------
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
-        """
-        Entrena el clasificador de regímenes. 
-        'y' debe contener labels [0, 1, 2].
-        """
-        if len(np.unique(y)) > 3:
-            raise ValueError("El target 'y' debe tener máximo 3 clases de régimen.")
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weight: Optional[np.ndarray] = None,
+    ) -> "RegimeAwareMetaLearner":
+        X = np.asarray(X)
+        y = np.asarray(y).astype(int)
+        self._validate_labels(y)
+        sw = self._compute_sample_weight(y, sample_weight)
 
-        self.model.fit(X, y)
-        
-        if SHAP_AVAILABLE:
-            self.explainer = shap.TreeExplainer(self.model)
-        else:
-            self.explainer = None
-
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            self.model.fit(X, y, sample_weight=sw)
+            if SHAP_AVAILABLE:
+                self.explainer = shap.TreeExplainer(self.model)
         self.is_fitted = True
+        return self
+
+    def cross_val_mlogloss(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weight: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Calcula mlogloss en ``n_splits`` folds temporales."""
+        X = np.asarray(X)
+        y = np.asarray(y).astype(int)
+        self._validate_labels(y)
+        sw_full = self._compute_sample_weight(y, sample_weight)
+
+        tscv = TimeSeriesSplit(n_splits=self.n_splits)
+        losses: list[float] = []
+        for train_idx, val_idx in tscv.split(X):
+            X_tr, X_va = X[train_idx], X[val_idx]
+            y_tr, y_va = y[train_idx], y[val_idx]
+            sw_tr = None if sw_full is None else sw_full[train_idx]
+            est = xgb.XGBClassifier(**self.model.get_params())
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                est.fit(X_tr, y_tr, sample_weight=sw_tr)
+            proba = est.predict_proba(X_va)
+            losses.append(_mlogloss(y_va, proba))
+        self.cv_mlogloss_ = np.asarray(losses, dtype=np.float64)
+        return self.cv_mlogloss_
 
     def predict_regime_probs(self, X: np.ndarray) -> np.ndarray:
-        """
-        Devuelve un vector de probabilidades [p0, p1, p2] para cada muestra.
-        """
         if not self.is_fitted:
-            raise RuntimeError("El modelo debe ser entrenado antes de predecir.")
-        return self.model.predict_proba(X)
+            raise RuntimeError("Model not fitted; call .fit() first")
+        return self.model.predict_proba(np.asarray(X))
 
-    def get_regime_explanation(self, X: np.ndarray, feature_names: list = None) -> list:
-        """
-        Explica por qué se eligió un régimen específico.
-        """
-        if not self.is_fitted or not SHAP_AVAILABLE:
-            return []
-        
-        # Simplificado para brevedad: explicar la clase con mayor prob
-        probs = self.predict_regime_probs(X)
-        main_regime = np.argmax(probs, axis=1)
-        
-        shap_values = self.explainer.shap_values(X)
-        # shap_values es una lista para multi-clase
-        
-        explanations = []
-        for i in range(X.shape[0]):
-            regime_idx = main_regime[i]
-            sample_shap = np.abs(shap_values[regime_idx][i])
-            top_indices = np.argsort(sample_shap)[-3:][::-1]
-            if feature_names:
-                explanations.append([feature_names[idx] for idx in top_indices])
-            else:
-                explanations.append([f"f_{idx}" for idx in top_indices])
-        return explanations
-
-    def get_shap_explanations(self, X: np.ndarray, feature_names: list = None,
-                              top_n: int = 5) -> list:
-        """
-        Calcula los valores SHAP para explicar las predicciones del modelo base.
-        Devuelve las top_n features más importantes para cada muestra.
-        """
+    def predict(self, X: np.ndarray) -> np.ndarray:
         if not self.is_fitted:
-            raise RuntimeError("El modelo debe ser entrenado antes de calcular SHAP.")
-        
+            raise RuntimeError("Model not fitted; call .fit() first")
+        return self.model.predict(np.asarray(X))
+
+    # ------------------------------------------------------------------
+    # Importancia / explicabilidad
+    # ------------------------------------------------------------------
+
+    @property
+    def feature_importances_(self) -> np.ndarray:
+        if not self.is_fitted:
+            raise RuntimeError("Model not fitted")
+        return np.asarray(self.model.feature_importances_, dtype=np.float64)
+
+    def _shap_top_features(
+        self,
+        X: np.ndarray,
+        regime_indices: Iterable[int],
+        top_n: int,
+        feature_names: Optional[Sequence[str]],
+    ) -> list[list[str]]:
+        if not self.is_fitted:
+            raise RuntimeError("Model not fitted")
         if not SHAP_AVAILABLE or self.explainer is None:
             return [["SHAP_NOT_AVAILABLE"] * top_n for _ in range(X.shape[0])]
-            
-        shap_values = self.explainer.shap_values(X)
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]  # clase 1 (CALL)
-
-        explanations = []
-        for i in range(X.shape[0]):
-            sample_shap = np.abs(shap_values[i])
-            top_indices = np.argsort(sample_shap)[-top_n:][::-1]
+        raw = self.explainer.shap_values(X)
+        explanations: list[list[str]] = []
+        regime_list = list(regime_indices)
+        for i, regime_idx in enumerate(regime_list):
+            shap_i = _normalize_shap_values(raw, int(regime_idx), i)
+            top_idx = np.argsort(np.abs(shap_i))[-top_n:][::-1]
             if feature_names is not None:
-                top_features = [feature_names[idx] for idx in top_indices]
+                explanations.append([feature_names[int(j)] for j in top_idx])
             else:
-                top_features = [f"feature_{idx}" for idx in top_indices]
-            explanations.append(top_features)
+                explanations.append([f"f_{int(j)}" for j in top_idx])
         return explanations
 
+    def get_regime_explanation(
+        self,
+        X: np.ndarray,
+        feature_names: Optional[Sequence[str]] = None,
+        top_n: int = 3,
+    ) -> list[list[str]]:
+        probs = self.predict_regime_probs(X)
+        regimes = np.argmax(probs, axis=1)
+        return self._shap_top_features(X, regimes, top_n, feature_names)
 
-if __name__ == "__main__":
-    print("Inicializando Meta-Learner XGBoost (clasificador de regímenes)...")
-    np.random.seed(42)
-    NUM_SAMPLES = 1000
-    OUTPUT_DIM = 64
-    NUM_REGIMES = 3
+    def get_shap_explanations(
+        self,
+        X: np.ndarray,
+        feature_names: Optional[Sequence[str]] = None,
+        top_n: int = 5,
+        regime: Optional[int] = None,
+    ) -> list[list[str]]:
+        """SHAP top-features. Si ``regime`` es ``None``, usa la clase
+        modal por muestra; si se especifica, fija la clase a explicar.
+        """
+        if regime is None:
+            probs = self.predict_regime_probs(X)
+            regimes = np.argmax(probs, axis=1)
+        else:
+            if regime not in (0, 1, 2):
+                raise ValueError("regime must be 0, 1 or 2")
+            regimes = np.full(X.shape[0], regime, dtype=int)
+        return self._shap_top_features(X, regimes, top_n, feature_names)
 
-    X_synthetic = np.random.randn(NUM_SAMPLES, OUTPUT_DIM)
-    # Etiquetas multi-clase [0, 1, 2] = (Low Vol, Trending, High Vol)
-    y_synthetic = np.random.randint(0, NUM_REGIMES, size=NUM_SAMPLES)
 
-    # Divisiones temporales manuales (respetando orden cronológico)
-    split_idx = int(0.8 * NUM_SAMPLES)
-    X_train, X_test = X_synthetic[:split_idx], X_synthetic[split_idx:]
-    y_train, _y_test = y_synthetic[:split_idx], y_synthetic[split_idx:]
+def _mlogloss(y_true: np.ndarray, y_proba: np.ndarray, eps: float = 1e-15) -> float:
+    n, k = y_proba.shape
+    y_oh = np.zeros_like(y_proba)
+    y_oh[np.arange(n), y_true] = 1.0
+    clipped = np.clip(y_proba, eps, 1.0 - eps)
+    return float(-np.sum(y_oh * np.log(clipped)) / n)
 
-    try:
-        meta_learner = RegimeAwareMetaLearner(n_splits=3)
-        print(f"Entrenando con {len(X_train)} muestras (orden cronológico)...")
-        meta_learner.fit(X_train, y_train)
 
-        print("Generando probabilidades por régimen...")
-        regime_probs = meta_learner.predict_regime_probs(X_test)
-
-        feature_names = [f"tft_emb_{i}" for i in range(OUTPUT_DIM)]
-        top_features = meta_learner.get_shap_explanations(X_test, feature_names=feature_names, top_n=5)
-
-        regime_labels = ["LOW_VOL", "TRENDING", "HIGH_VOL"]
-        print("\n--- REPORTE DE RÉGIMEN (Muestra 0) ---")
-        for idx, label in enumerate(regime_labels):
-            print(f"  P({label}): {regime_probs[0, idx]:.4f}")
-        print(f"Top 5 Features (SHAP): {top_features[0]}")
-
-        assert regime_probs.shape == (len(X_test), NUM_REGIMES)
-        assert np.allclose(regime_probs.sum(axis=1), 1.0, atol=1e-6)
-        assert np.all((regime_probs >= 0) & (regime_probs <= 1))
-        print("\n[OK] Meta-Learner ejecutado correctamente.")
-
-    except Exception as e:
-        print(f"\n[ERROR] {e}")
+__all__ = ["DEFAULT_REGIME_LABELS", "RegimeAwareMetaLearner"]

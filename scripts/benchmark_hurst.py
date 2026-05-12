@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import time
 from numba import njit
-from src.features.generator import FeatureGenerator
 
 def original_calculate_hurst(series: pd.Series, window: int = 20) -> pd.Series:
     """Original implementation for benchmarking."""

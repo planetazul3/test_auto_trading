@@ -61,7 +61,43 @@ Thumbs.db
 .settings/
 # Audit
 project_audit_dump.txt
-*audit*
+project_audit*.txt
 
 # MLflow tracking artifacts
 mlruns/
+
+# --- ML-Signal-Engine generated artifacts ---
+# Checkpoints, optuna studies, DuckDB stores, parquet caches.
+ckpts/
+checkpoints/
+optuna_studies/
+*.duckdb
+*.duckdb.wal
+data/
+parquet_cache/
+
+# Backtest output JSONs
+bt_results*.json
+*_results.json
+
+# Calibrator bundles (a veces grandes)
+calibrator_bundle*.json
+
+# Coverage + tooling caches
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+logs/
+
+# Local override de configs
+*.local.yaml
+*.local.yml
+*.local.toml
+
+# Environment override
+.env.local

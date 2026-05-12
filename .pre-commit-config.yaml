@@ -1,0 +1,49 @@
+# Pre-commit hooks: ejecutar localmente con
+#   pip install pre-commit && pre-commit install && pre-commit run --all-files
+# Espejo en CI: .github/workflows/test.yml::lint usa ruff con la misma versión.
+
+repos:
+  # Higiene básica.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^.*\.md$'
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=2048']
+      - id: detect-private-key
+
+  # Linter rápido (mismo pin que en [dev] de pyproject.toml).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.15
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # Type-check estricto en src/ (los tests se excluyen por costo).
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        files: ^src/
+        additional_dependencies:
+          - 'numpy<2'
+          - 'pandas>=2.2,<2.3'
+          - 'pydantic>=2.6,<2.7'
+        args:
+          - --ignore-missing-imports
+          - --check-untyped-defs
+
+ci:
+  # Configuración para pre-commit.ci si se habilita el bot.
+  autofix_commit_msg: |
+    style: apply pre-commit autofixes
+
+    Hooks: ruff (autofix), trailing-whitespace, end-of-file-fixer.
+  autoupdate_commit_msg: 'chore(deps): autoupdate pre-commit hooks'
+  autoupdate_schedule: monthly

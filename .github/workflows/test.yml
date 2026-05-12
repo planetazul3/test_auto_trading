@@ -1,0 +1,88 @@
+name: test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ``legacy-features`` se omite a propósito del CI:
+        # pandas-ta 0.3.14b0 es un sdist (sin wheel) que falla a buildar
+        # contra setuptools moderno. ``tests/conftest.py`` auto-skipea
+        # ``test_feature_generator.py`` e ``test_integrity.py`` cuando
+        # pandas-ta no está → 224 tests corren idénticos en ambas
+        # versiones de Python.
+        python-version: ['3.11', '3.12']
+        install-extras: ['dev,observability,deriv-ingest,training,tuning,backtest,serving']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Show environment
+        run: |
+          python -V
+          pip -V
+
+      - name: Install package + extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[${{ matrix.install-extras }}]"
+          # Print resolved versions for debugging future install failures.
+          pip list
+
+      - name: Verify imports compile
+        run: |
+          python -c "import src.models.tft_attention, src.models.calibration, src.models.cnn_extractor, src.models.bilstm_encoder, src.models.hybrid_tft, src.models.ensemble, src.models.meta_learner, src.models.heads, src.models.conditioning, src.models.composite, src.models.calibration_bundle, src.models.conformal, src.models.drift"
+          python -c "import src.data, src.training, src.backtest, src.risk, src.observability"
+          python -c "import src.connectors.deriv.storage, src.connectors.deriv.ingest, src.connectors.deriv.client"
+
+      - name: Run tests
+        env:
+          PYTHONHASHSEED: '0'
+        run: |
+          pytest --no-header -ra -W error -p no:cacheprovider
+
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-py${{ matrix.python-version }}
+          path: |
+            .pytest_cache/
+            pytest.log
+          if-no-files-found: ignore
+
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install lint tooling
+        run: |
+          python -m pip install --upgrade pip
+          # ruff fijo a la versión declarada en pyproject [dev].
+          pip install 'ruff==0.1.15'
+      - name: Run ruff
+        run: |
+          ruff check src tests scripts

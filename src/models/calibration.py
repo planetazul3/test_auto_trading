@@ -1,17 +1,37 @@
-import numpy as np
-from sklearn.isotonic import IsotonicRegression
-from collections import deque
+"""Calibrador isotónico rolling de baja latencia.
+
+Funcionalidad:
+
+* Buffer rodante FIFO de margins/labels (deque).
+* Re-fit periódico via ``IsotonicRegression`` (PAVA, O(N)).
+* Inferencia O(log N) con búsqueda binaria interpolada en Numba.
+* Re-entrenamiento en background **race-free**: la guarda se toma bajo
+  lock antes de spawnar el thread, evitando dos refits simultáneos que
+  corrompían la curva.
+* Snapshot atómico de la curva: leer/asignar ``(x_thresholds, y_values)``
+  como una sola tupla previene tuple-tearing entre el thread de update y
+  ``calibrate_signal``.
+* Métricas de calidad expuestas: Brier score, ECE (Expected Calibration
+  Error) y diagnostic ``calibration_curve``.
+"""
+
+from __future__ import annotations
+
 import threading
+from typing import Optional, Tuple
+
+import numpy as np
 from numba import njit
+from sklearn.isotonic import IsotonicRegression
+
 
 @njit(fastmath=True, cache=True)
 def fast_isotonic_inference(
     x_test: float, x_thresholds: np.ndarray, y_values: np.ndarray
 ) -> float:
-    """
-    Inferencia O(log N) sobre la curva isotónica con interpolación lineal
-    entre los escalones — coincide con el comportamiento de
-    ``IsotonicRegression.predict`` cuando ``out_of_bounds='clip'``.
+    """Inferencia O(log N) con interpolación lineal entre escalones.
+
+    Coincide con ``IsotonicRegression.predict`` cuando ``out_of_bounds='clip'``.
     """
     n = x_thresholds.shape[0]
     if n == 0:
@@ -21,7 +41,6 @@ def fast_isotonic_inference(
     if x_test >= x_thresholds[-1]:
         return float(y_values[-1])
 
-    # Búsqueda binaria del intervalo [low, low+1] que contiene x_test.
     low = 0
     high = n - 1
     while high - low > 1:
@@ -40,96 +59,227 @@ def fast_isotonic_inference(
     slope = (y_hi - y_lo) / (x_hi - x_lo)
     return float(y_lo + slope * (x_test - x_lo))
 
+
+_NEUTRAL_CURVE: Tuple[np.ndarray, np.ndarray] = (
+    np.array([-1e9, 1e9], dtype=np.float64),
+    np.array([0.5, 0.5], dtype=np.float64),
+)
+
+
 class LowLatencyRollingIsotonicCalibrator:
+    """Calibrador isotónico con ventana rodante y refit en background.
+
+    Parameters
+    ----------
+    window_size:
+        Máximo de observaciones en el buffer FIFO.
+    min_observations:
+        Umbral mínimo para fittear la primera vez (default 100).
+        Parametrizable para entornos con poca historia inicial.
     """
-    Calibrador de probabilidades usando regresión isotónica con ventana rodante.
-    Optimizado para ultra-baja latencia mediante Numba e inferencia binaria.
-    Incluye desacoplamiento por hilos para evitar picos de latencia.
-    """
-    def __init__(self, window_size: int = 5000):
-        self.window_size = window_size
-        self.margins = deque(maxlen=window_size)
-        self.labels = deque(maxlen=window_size)
-        self.model = IsotonicRegression(out_of_bounds='clip')
-        
-        # Parámetros para inferencia rápida (Numba)
-        self.x_thresholds = np.array([-1e9, 1e9])
-        self.y_values = np.array([0.5, 0.5])
-        
+
+    def __init__(self, window_size: int = 5000, min_observations: int = 100) -> None:
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        if min_observations <= 1:
+            raise ValueError("min_observations must be > 1")
+        self.window_size = int(window_size)
+        self.min_observations = int(min_observations)
+
+        # Ring buffer NumPy pre-allocado: ``add_observation`` es O(1) y
+        # ``update_calibration_curve`` evita una copia O(N) (sólo
+        # concatena dos vistas si hubo wrap-around). Esto mantiene a la
+        # PAVA contenta con arrays float64 contiguos.
+        self._margins_buf = np.zeros(self.window_size, dtype=np.float64)
+        self._labels_buf = np.zeros(self.window_size, dtype=np.float64)
+        self._head: int = 0   # próxima posición a escribir
+        self._count: int = 0  # observaciones válidas en el buffer
+
+        self.model: IsotonicRegression = IsotonicRegression(out_of_bounds="clip")
+
+        # Curva como una sola tupla → lecturas atómicas en Python (GIL).
+        self._curve: Tuple[np.ndarray, np.ndarray] = _NEUTRAL_CURVE
+
         self.is_fitted = False
         self._lock = threading.Lock()
-        self._updating = False
+        # Guarda race-free: se chequea/setea bajo el mismo lock.
+        self._update_in_progress = False
+        # Permite a los caller esperar el fin de un refit en background
+        # sin polling. Empieza setteado ("nada en vuelo").
+        self._update_done = threading.Event()
+        self._update_done.set()
 
-    def add_observation(self, margin: float, label: int):
-        """
-        Añade una nueva observación al buffer. Hilo-seguro.
-        """
+    # ------------------------------------------------------------------
+    # Buffer
+    # ------------------------------------------------------------------
+
+    def add_observation(self, margin: float, label: int) -> None:
         with self._lock:
-            self.margins.append(float(margin))
-            self.labels.append(int(label))
+            self._margins_buf[self._head] = float(margin)
+            self._labels_buf[self._head] = float(int(label))
+            self._head = (self._head + 1) % self.window_size
+            if self._count < self.window_size:
+                self._count += 1
 
-    def update_calibration_curve(self):
-        """
-        Ejecuta el entrenamiento en el hilo actual (bloqueante).
-        """
-        if len(self.margins) < 100:
-            return
-
+    def reset(self) -> None:
+        """Vacía el buffer y resetea la curva (útil en walk-forward)."""
         with self._lock:
-            x = np.array(self.margins)
-            y = np.array(self.labels)
-        
-        # El algoritmo PAVA de sklearn es O(N)
-        new_model = IsotonicRegression(out_of_bounds='clip').fit(x, y)
-        
-        # Extraer puntos de interpolación para Numba
-        # sklearn almacena los puntos únicos en X_thresholds_ e y_thresholds_
-        # tras el fit en versiones recientes.
+            self._head = 0
+            self._count = 0
+            self._curve = _NEUTRAL_CURVE
+            self.is_fitted = False
+
+    @property
+    def n_observations(self) -> int:
+        with self._lock:
+            return int(self._count)
+
+    @property
+    def curve(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Snapshot atómico ``(x_thresholds, y_values)``."""
+        return self._curve
+
+    def _snapshot_buffer(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Copia el contenido del ring buffer en orden temporal.
+
+        Si no hay wrap-around (``count < window_size`` o ``head == 0``
+        con buffer lleno), una única vista contigua es suficiente.
+        """
+        n = self._count
+        if n == 0:
+            return (
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+            )
+        if n < self.window_size:
+            # Buffer aún no completo: las primeras ``count`` posiciones son válidas.
+            x = self._margins_buf[:n].copy()
+            y = self._labels_buf[:n].copy()
+        else:
+            # Wrap-around: orden temporal = [head:] ++ [:head].
+            h = self._head
+            x = np.concatenate((self._margins_buf[h:], self._margins_buf[:h]))
+            y = np.concatenate((self._labels_buf[h:], self._labels_buf[:h]))
+        return x, y
+
+    # ------------------------------------------------------------------
+    # Fit
+    # ------------------------------------------------------------------
+
+    def update_calibration_curve(self) -> bool:
+        """Re-fit síncrono. Devuelve ``True`` si la curva se actualizó."""
+        with self._lock:
+            if self._count < self.min_observations:
+                return False
+            x, y = self._snapshot_buffer()
+
+        new_model = IsotonicRegression(out_of_bounds="clip").fit(x, y)
+        x_th = np.asarray(new_model.X_thresholds_, dtype=np.float64).copy()
+        y_th = np.asarray(new_model.y_thresholds_, dtype=np.float64).copy()
+
         with self._lock:
             self.model = new_model
-            self.x_thresholds = self.model.X_thresholds_.copy()
-            self.y_values = self.model.y_thresholds_.copy()
+            # Asignación de tupla atómica respecto a lecturas concurrentes.
+            self._curve = (x_th, y_th)
             self.is_fitted = True
+        return True
 
-    def update_in_background(self):
+    def update_in_background(self) -> bool:
+        """Spawna refit en thread. Race-free: si ya hay uno corriendo, no-op.
+
+        Devuelve ``True`` si se spawnó un nuevo thread. Los tests/caller
+        pueden esperar a su finalización con ``wait_update_done()``.
         """
-        Inicia el re-entrenamiento en un hilo separado para no bloquear el path crítico.
-        """
-        if self._updating:
-            return
-        
-        def target():
-            self._updating = True
+        with self._lock:
+            if self._update_in_progress:
+                return False
+            self._update_in_progress = True
+            self._update_done.clear()
+
+        def _target() -> None:
             try:
                 self.update_calibration_curve()
             finally:
-                self._updating = False
-        
-        thread = threading.Thread(target=target, daemon=True)
-        thread.start()
+                with self._lock:
+                    self._update_in_progress = False
+                self._update_done.set()
+
+        threading.Thread(target=_target, daemon=True).start()
+        return True
+
+    def wait_update_done(self, timeout: float | None = None) -> bool:
+        """Bloquea hasta que el refit en background termine (o se cumpla
+        el timeout). Devuelve ``True`` si terminó, ``False`` si timeout."""
+        return self._update_done.wait(timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # Inferencia
+    # ------------------------------------------------------------------
 
     def calibrate_signal(self, margin: float) -> float:
-        """
-        Inferencia ultra-rápida usando el buscador binario Numba.
-        """
+        """Inferencia O(log N) con snapshot atómico de la curva."""
         if not self.is_fitted:
-            return 1.0 / (1.0 + np.exp(-margin))
-        
-        # Usamos los arrays de umbrales actuales (protegidos por copia en update)
-        return fast_isotonic_inference(margin, self.x_thresholds, self.y_values)
+            # Fallback sigmoide hasta el primer fit.
+            return float(1.0 / (1.0 + np.exp(-float(margin))))
+        x_th, y_th = self._curve  # lectura atómica (Python tuple ref)
+        return float(fast_isotonic_inference(float(margin), x_th, y_th))
+
+    # ------------------------------------------------------------------
+    # Métricas
+    # ------------------------------------------------------------------
+
+    def brier_score(
+        self,
+        margins: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None,
+    ) -> float:
+        """Brier score sobre la ventana actual (o un set externo)."""
+        m, y = self._eval_set(margins, labels)
+        if m.size == 0:
+            return float("nan")
+        p = np.array([self.calibrate_signal(float(v)) for v in m], dtype=np.float64)
+        return float(np.mean((p - y) ** 2))
+
+    def expected_calibration_error(
+        self,
+        margins: Optional[np.ndarray] = None,
+        labels: Optional[np.ndarray] = None,
+        n_bins: int = 10,
+    ) -> float:
+        """Expected Calibration Error con binning equi-ancho en [0,1]."""
+        if n_bins < 2:
+            raise ValueError("n_bins must be >= 2")
+        m, y = self._eval_set(margins, labels)
+        if m.size == 0:
+            return float("nan")
+        p = np.array([self.calibrate_signal(float(v)) for v in m], dtype=np.float64)
+        bins = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        n = p.shape[0]
+        for k in range(n_bins):
+            lo, hi = bins[k], bins[k + 1]
+            mask = (p >= lo) & (p < hi) if k < n_bins - 1 else (p >= lo) & (p <= hi)
+            if not mask.any():
+                continue
+            conf = float(p[mask].mean())
+            acc = float(y[mask].mean())
+            ece += (mask.sum() / n) * abs(conf - acc)
+        return float(ece)
+
+    def _eval_set(
+        self,
+        margins: Optional[np.ndarray],
+        labels: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if margins is None or labels is None:
+            with self._lock:
+                m, y = self._snapshot_buffer()
+        else:
+            m = np.asarray(margins, dtype=np.float64)
+            y = np.asarray(labels, dtype=np.float64)
+        if m.shape != y.shape:
+            raise ValueError("margins and labels must share shape")
+        return m, y
 
 
-if __name__ == "__main__":
-    calibrator = LowLatencyRollingIsotonicCalibrator(window_size=1000)
-    
-    # Simular datos
-    for _ in range(500):
-        m = np.random.randn()
-        l = 1 if m + np.random.randn() * 0.5 > 0 else 0
-        calibrator.add_observation(m, l)
-    
-    calibrator.update_calibration_curve()
-    
-    test_margin = 1.5
-    prob = calibrator.calibrate_signal(test_margin)
-    print(f"Margen: {test_margin} -> Probabilidad Calibrada: {prob:.4f}")
+__all__ = ["LowLatencyRollingIsotonicCalibrator", "fast_isotonic_inference"]

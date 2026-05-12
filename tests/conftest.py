@@ -1,6 +1,18 @@
+import importlib.util
+
 import numpy as np
 import pandas as pd
 import pytest
+
+
+# Tests que importan ``src.features.generator`` (pandas-ta) deben skipearse
+# silenciosamente cuando la dependencia no está disponible — p.ej. en
+# Python 3.11 donde las wheels de pandas-ta no se publican.
+collect_ignore_glob: list[str] = []
+if importlib.util.find_spec("pandas_ta") is None:
+    collect_ignore_glob.extend(
+        ["test_feature_generator.py", "test_integrity.py"]
+    )
 
 
 @pytest.fixture(scope="session")

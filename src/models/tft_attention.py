@@ -1,203 +1,285 @@
+"""Bloques de fusión y atención estilo Temporal Fusion Transformer.
+
+Diseño:
+
+* ``GatedLinearUnit`` y ``GatedResidualNetwork`` son los bloques base
+  del TFT (Lim et al., 2020): la GRN ya integra **Add & Norm** internamente,
+  así que el caller no debe envolver su salida en otra residual+LayerNorm.
+* ``TFTFusionNode`` aplica:
+    1. Selección de variables (GLU sobre la concatenación de fuentes).
+    2. Multi-Head Self-Attention temporal con máscara causal estricta.
+    3. GRN post-atención.
+    4. Proyección final.
+  La máscara causal se cachea como buffer y se trunca al ``seq_len`` real
+  para evitar reconstruirla en cada forward (latencia crítica).
+* Soporta ``key_padding_mask`` opcional para secuencias de longitud
+  variable.
+* Validaciones explícitas: ``embedding_dim`` debe ser divisible por
+  ``num_heads`` y todos los tensores fuente deben coincidir en
+  ``(batch, seq, embedding_dim)``.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Optional
+
+# Máxima longitud de máscara causal pre-allocada en el buffer. Si se
+# excede en runtime, se reconstruye on-the-fly (camino frío).
+_DEFAULT_MAX_CACHED_SEQ_LEN = 4096
+
 
 class GatedLinearUnit(nn.Module):
-    """
-    Gated Linear Unit (GLU) para control de flujo de información.
-    Permite al modelo suprimir features irrelevantes mediante un mecanismo de gating.
-    Basado en el paper 'Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting'.
-    """
-    def __init__(self, input_dim: int):
-        super(GatedLinearUnit, self).__init__()
+    """GLU del TFT: ``value · sigmoid(gate)`` con proyección 2D."""
+
+    def __init__(self, input_dim: int) -> None:
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be > 0")
         self.fc = nn.Linear(input_dim, input_dim * 2)
-        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch, ..., input_dim)
-        gate = self.fc(x)
-        value, gate = gate.chunk(2, dim=-1)
-        return value * self.sigmoid(gate)
+        value, gate = self.fc(x).chunk(2, dim=-1)
+        return value * torch.sigmoid(gate)
+
 
 class GatedResidualNetwork(nn.Module):
+    """GRN con Add & Norm interno (Lim et al., 2020, eq. 4-5).
+
+    Acepta un contexto estático opcional ``c`` que se suma a la rama
+    transformada antes de la activación, útil para inyectar embeddings
+    condicionantes (asset, granularidad).
     """
-    Gated Residual Network (GRN) inspirado en TFT.
-    Proporciona complejidad adaptativa: permite al modelo aplicar transformaciones no lineales 
-    complejas solo cuando es necesario, o saltarlas mediante una conexión residual y GLU.
-    """
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: Optional[int] = None, dropout: float = 0.1):
-        super(GatedResidualNetwork, self).__init__()
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: Optional[int] = None,
+        context_dim: Optional[int] = None,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        if input_dim <= 0 or hidden_dim <= 0:
+            raise ValueError("input_dim and hidden_dim must be > 0")
+        if dropout < 0.0 or dropout >= 1.0:
+            raise ValueError("dropout must be in [0, 1)")
         self.output_dim = output_dim or input_dim
-        
+
         self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.context_proj = (
+            nn.Linear(context_dim, hidden_dim, bias=False)
+            if context_dim is not None
+            else None
+        )
         self.elu = nn.ELU()
         self.fc2 = nn.Linear(hidden_dim, self.output_dim)
         self.dropout = nn.Dropout(dropout)
         self.glu = GatedLinearUnit(self.output_dim)
         self.layer_norm = nn.LayerNorm(self.output_dim)
-        
-        # Proyección de residuo si las dimensiones de entrada y salida difieren
-        if input_dim != self.output_dim:
-            self.res_project = nn.Linear(input_dim, self.output_dim)
-        else:
-            self.res_project = nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape: (batch, ..., input_dim)
+        self.res_project: nn.Module = (
+            nn.Identity()
+            if input_dim == self.output_dim
+            else nn.Linear(input_dim, self.output_dim)
+        )
+
+    def forward(
+        self, x: torch.Tensor, context: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         residual = self.res_project(x)
-        
-        x = self.fc1(x)
-        x = self.elu(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        x = self.glu(x)
-        
-        # Add & Norm: Conexión residual seguida de LayerNorm
-        return self.layer_norm(x + residual)
+        h = self.fc1(x)
+        if self.context_proj is not None and context is not None:
+            # Broadcast del contexto sobre la dimensión temporal si existe.
+            ctx = self.context_proj(context)
+            if ctx.dim() < h.dim():
+                ctx = ctx.unsqueeze(-2)
+            h = h + ctx
+        h = self.elu(h)
+        h = self.fc2(h)
+        h = self.dropout(h)
+        h = self.glu(h)
+        return self.layer_norm(h + residual)
+
 
 class TFTFusionNode(nn.Module):
+    """Fusión multi-fuente + atención temporal causal.
+
+    Parameters
+    ----------
+    embedding_dim:
+        Dimensión de los embeddings de cada fuente y de la representación
+        interna. Debe ser divisible por ``num_heads``.
+    num_heads:
+        Cabezas de atención multi-head.
+    num_sources:
+        Número de embeddings que se fusionan al inicio.
+    dropout:
+        Dropout aplicado en la atención, GRN y selector de variables.
+    output_dim:
+        Dimensión de salida (por defecto = ``embedding_dim``).
+    max_cached_seq_len:
+        Tamaño máximo de la máscara causal pre-allocada como buffer. Si la
+        secuencia excede, se reconstruye en runtime sin error.
+    average_attn_weights:
+        Si ``True`` (default) los pesos se promedian sobre cabezas →
+        ``(batch, seq, seq)``. Si ``False`` → ``(batch, num_heads, seq, seq)``.
     """
-    Nodo de Fusión Temporal Avanzado (TFT).
-    Aplica atención multi-head a través del tiempo con máscara causal estricta.
-    Fusa múltiples fuentes (CNN, LSTM) antes de la atención temporal.
-    """
-    def __init__(self, 
-                 embedding_dim: int = 64, 
-                 num_heads: int = 4, 
-                 num_sources: int = 2, 
-                 dropout: float = 0.2, 
-                 output_dim: int = 64):
-        super(TFTFusionNode, self).__init__()
-        
+
+    def __init__(
+        self,
+        embedding_dim: int = 64,
+        num_heads: int = 4,
+        num_sources: int = 2,
+        dropout: float = 0.2,
+        output_dim: Optional[int] = None,
+        max_cached_seq_len: int = _DEFAULT_MAX_CACHED_SEQ_LEN,
+        average_attn_weights: bool = True,
+    ) -> None:
+        super().__init__()
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be > 0")
+        if num_heads <= 0:
+            raise ValueError("num_heads must be > 0")
+        if embedding_dim % num_heads != 0:
+            raise ValueError(
+                f"embedding_dim ({embedding_dim}) must be divisible by "
+                f"num_heads ({num_heads})"
+            )
+        if num_sources <= 0:
+            raise ValueError("num_sources must be > 0")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+
         self.embedding_dim = embedding_dim
         self.num_sources = num_sources
         self.num_heads = num_heads
-        
-        # 1. Variable Selection Gating (Fusión de fuentes por cada paso de tiempo)
+        self.output_dim = output_dim or embedding_dim
+        self.average_attn_weights = average_attn_weights
+
+        # 1. Variable Selection: concatena fuentes y proyecta con GLU.
         self.source_projector = nn.Sequential(
             nn.Linear(embedding_dim * num_sources, embedding_dim),
             GatedLinearUnit(embedding_dim),
-            nn.LayerNorm(embedding_dim)
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(dropout),
         )
-        
-        # 2. Multi-Head Attention Temporal (Causal)
+
+        # 2. Multi-Head Attention temporal.
         self.multihead_attn = nn.MultiheadAttention(
-            embed_dim=embedding_dim, 
-            num_heads=num_heads, 
-            dropout=dropout, 
-            batch_first=True
+            embed_dim=embedding_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
-        self.norm1 = nn.LayerNorm(embedding_dim)
-        
-        # 3. Post-Attention GRN
+        self.norm_attn = nn.LayerNorm(embedding_dim)
+
+        # 3. GRN post-atención (ya hace Add&Norm; NO envolver afuera).
         self.grn = GatedResidualNetwork(
             input_dim=embedding_dim,
             hidden_dim=embedding_dim,
-            dropout=dropout
+            dropout=dropout,
         )
-        self.norm2 = nn.LayerNorm(embedding_dim)
-        
-        # 4. Proyección final
-        self.output_projection = nn.Sequential(
-            nn.Linear(embedding_dim, output_dim),
-            nn.LayerNorm(output_dim)
+
+        # 4. Proyección final.
+        self.output_projection = nn.Linear(embedding_dim, self.output_dim)
+        self.output_norm = nn.LayerNorm(self.output_dim)
+
+        # Máscara causal cacheada como buffer. Persistirá en el state_dict
+        # pero no participa del backward.
+        max_len = max(1, int(max_cached_seq_len))
+        mask = torch.triu(
+            torch.ones(max_len, max_len, dtype=torch.bool), diagonal=1
         )
-        
+        self.register_buffer("_causal_mask_cache", mask, persistent=False)
+
         self._init_weights()
 
-    def _init_weights(self):
+    def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, source_embs: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass con máscara causal.
-        Args:
-            source_embs: Lista de Tensors de forma (batch_size, seq_len, embedding_dim)
-        """
-        # 1. Concatenar y proyectar fuentes: (batch, seq, embedding_dim)
-        x = torch.cat(source_embs, dim=-1)
-        x = self.source_projector(x)
-        
-        # 2. Generar Máscara Causal (Upper Triangular)
-        seq_len = x.size(1)
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool()
-        
-        # 3. Multi-Head Attention Temporal (causal explícita).
-        attn_output, attn_weights_opt = self.multihead_attn(
-            query=x, key=x, value=x,
-            attn_mask=mask,
-            is_causal=True,
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        cache: torch.Tensor = self._causal_mask_cache  # type: ignore[assignment]
+        if seq_len <= cache.size(0):
+            return cache[:seq_len, :seq_len].to(device, non_blocking=True)
+        return torch.triu(
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=device),
+            diagonal=1,
         )
 
-        attn_weights = attn_weights_opt if attn_weights_opt is not None else torch.empty(0)
-        
-        x = self.norm1(x + attn_output)
-        
-        # 4. Post-Attention GRN
-        x = self.norm2(x + self.grn(x))
-        
-        # 5. Proyección Final
-        enriched_representation = self.output_projection(x)
-        
-        return enriched_representation, attn_weights
+    def forward(
+        self,
+        source_embs: List[torch.Tensor],
+        key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward.
+
+        Args
+        ----
+        source_embs:
+            Lista de ``num_sources`` tensores ``(B, S, E)``.
+        key_padding_mask:
+            ``(B, S)`` con ``True`` en posiciones a enmascarar.
+        """
+        if len(source_embs) != self.num_sources:
+            raise ValueError(
+                f"Expected {self.num_sources} sources, got {len(source_embs)}"
+            )
+        ref = source_embs[0]
+        if ref.dim() != 3:
+            raise ValueError(f"Expected 3D tensors, got {ref.dim()}D")
+        b, s, _ = ref.shape
+        for i, src in enumerate(source_embs):
+            if src.shape != ref.shape:
+                raise ValueError(
+                    f"source_embs[{i}] shape {tuple(src.shape)} != "
+                    f"reference {tuple(ref.shape)}"
+                )
+
+        # 1. Variable selection.
+        x = torch.cat(source_embs, dim=-1)
+        x = self.source_projector(x)
+
+        # 2. Multi-head self-attention con máscara causal explícita
+        #    (compatibilidad con PyTorch >=2.3 que requiere is_causal=False
+        #    cuando se provee attn_mask).
+        causal_mask = self._causal_mask(s, x.device)
+        attn_output, attn_weights_opt = self.multihead_attn(
+            query=x,
+            key=x,
+            value=x,
+            attn_mask=causal_mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=True,
+            average_attn_weights=self.average_attn_weights,
+            is_causal=False,
+        )
+
+        if attn_weights_opt is None:  # need_weights=False u optimizaciones
+            if self.average_attn_weights:
+                attn_weights = torch.zeros(b, s, s, device=x.device, dtype=x.dtype)
+            else:
+                attn_weights = torch.zeros(
+                    b, self.num_heads, s, s, device=x.device, dtype=x.dtype
+                )
+        else:
+            attn_weights = attn_weights_opt
+
+        # Add & Norm tras la atención.
+        x = self.norm_attn(x + attn_output)
+
+        # 3. GRN: ya integra Add&Norm; NO envolver en otra residual.
+        x = self.grn(x)
+
+        # 4. Proyección final + LayerNorm.
+        out = self.output_norm(self.output_projection(x))
+        return out, attn_weights
 
 
-if __name__ == "__main__":
-    print("Iniciando suite de validación: TFTFusionNode (Production-Ready)")
-
-    # Parámetros de prueba consistentes con el HybridSignalEngine
-    BATCH_SIZE = 16
-    SEQ_LEN = 60
-    EMB_DIM = 64
-    NUM_HEADS = 4
-    OUTPUT_DIM = 64
-
-    torch.manual_seed(42)
-
-    # Prueba con 2 fuentes (CNN, LSTM): tensores 3D (batch, seq, emb)
-    print("\n--- TEST 1: Dual Source Integration (CNN + LSTM) ---")
-    model_2 = TFTFusionNode(num_sources=2, embedding_dim=EMB_DIM, output_dim=OUTPUT_DIM)
-    model_2.eval()
-
-    s1 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
-    s2 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
-
-    with torch.no_grad():
-        out_2, attn_2 = model_2([s1, s2])
-
-    print(f"Output shape: {tuple(out_2.shape)} (Esperado: {(BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)})")
-    print(f"Attn weights shape: {tuple(attn_2.shape)} (Esperado: {(BATCH_SIZE, SEQ_LEN, SEQ_LEN)})")
-    assert out_2.shape == (BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)
-    assert not torch.isnan(out_2).any(), "NaNs detectados en la salida"
-
-    # Prueba con 3 fuentes (Futuras expansiones: Sentiment, Macro, Orderbook)
-    print("\n--- TEST 2: Multi-Source Flexibility (3 fuentes) ---")
-    model_3 = TFTFusionNode(num_sources=3, embedding_dim=EMB_DIM, output_dim=OUTPUT_DIM)
-    model_3.eval()
-    s3 = torch.randn(BATCH_SIZE, SEQ_LEN, EMB_DIM)
-
-    with torch.no_grad():
-        out_3, _attn_3 = model_3([s1, s2, s3])
-    print(f"Output shape (3 sources): {tuple(out_3.shape)}")
-    assert out_3.shape == (BATCH_SIZE, SEQ_LEN, OUTPUT_DIM)
-
-    # Validación de Despliegue (TorchScript)
-    print("\n--- TEST 3: Production Deployment (TorchScript JIT) ---")
-    try:
-        scripted = torch.jit.script(model_2)
-        with torch.no_grad():
-            s_out, _ = scripted([s1, s2])
-
-        # Verificamos que la salida sea idéntica (dentro de tolerancia numérica)
-        assert torch.allclose(out_2, s_out, atol=1e-5)
-        print("[OK] Modelo compatible con JIT y verificado para producción.")
-    except Exception as e:
-        print(f"[FAIL] Error en validación JIT: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\n[SUCCESS] TFTFusionNode validado y listo para integración en HybridSignalEngine.")
+__all__ = ["GatedLinearUnit", "GatedResidualNetwork", "TFTFusionNode"]
