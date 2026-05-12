@@ -186,17 +186,13 @@ Leyenda:
 - [ ] **F4.** Benchmarks de latencia de `generate_signal` (target p99 < 5ms en CPU).
 
 ### Hyperparameter tuning (Optuna)
-> **Necesario.** Ya tenemos `TrainingConfig` paramétrica; Optuna se enchufa encima sin
-> tocar runtime. Plan en fases:
 
-- [ ] **G1. Wrapper `src/training/tuning.py`** — `tune(study, n_trials, search_space, base_cfg, datasets) → optuna.Study`. `objective(trial)` muestrea `lr`, `dropout`, `embedding_dim`, `lstm_hidden`, `num_attention_heads`, `cnn_channels`, `barrier_pct`, `calibrator_window`. Construye `TrainingConfig` derivado y entrena.
-- [ ] **G2. Métrica objetivo: Brier post-calibración** del cabezal CALL/PUT (no `val_loss` cruda — alinea con utilidad de producción). Multi-objective opcional para coverage del conformal interval (depende de B3).
-- [ ] **G3. Pruner `MedianPruner(n_warmup_steps=2, n_min_trials=5)`**, intermediates por epoch. Subir a `HyperbandPruner` cuando se escale a >100 trials.
-- [ ] **G4. Walk-forward dentro del trial** — `k=3` folds con `purged_split` y promediar. Sin esto Optuna sobreajusta al fold único de validación. Coste ~3x.
-- [ ] **G5. Storage SQLite** (`optuna.db`, `load_if_exists=True`) para resumir entre sesiones.
-- [ ] **G6. Estrategia DDP/trial**: cada trial = single-GPU/CPU. Optuna paraleliza con `n_jobs=k`, un GPU por trial. DDP queda reservado al fit final con hyperparams ganadores.
-- [ ] **G7. Tuner XGBoost** del `RegimeAwareMetaLearner` con `optuna.integration.XGBoostPruningCallback` + `early_stopping_rounds`. Tunea `max_depth`, `lr`, `n_estimators`, `subsample`, `class_weight`. Ejecución barata (sin GPU).
-- [ ] **G8. CLI `scripts/tune.py`**: `--study-name`, `--n-trials`, `--storage`, `--target {brier,val_loss,sharpe}`, `--max-epochs-per-trial`, `--search-space yaml`.
-- [ ] **G9. Tests** con `optuna.samplers.RandomSampler` + `n_trials=2` + `max_epochs=1` para no inflar la suite con corridas reales.
-
-> **Riesgos a mitigar**: no tunear `barrier_pct` del label (induce leakage); usar `PatientPruner` con datasets pequeños; tunear primero por contrato y luego armonizar (los contratos con menos data dominan el ruido si se mezclan).
+- [x] **G1. Wrapper `src/training/tuning.py`** — `BackboneObjective` + `tune(study, n_trials, ...)`. `SearchSpace` dataclass declarativo (`FloatRange/IntRange/Categorical`); cada campo `None` queda fijo a la `base_config`. Soporta tuples categóricos (e.g. `cnn_channels`) via repr/eval round-trip.
+- [x] **G2. Métrica objetivo: Brier post-calibración** — `target="brier"` calibra un `PerContractCalibratorBundle` sobre val tras cada fold y devuelve el Brier promedio por celda. Alternativa `target="val_loss"` para fallback rápido.
+- [x] **G3. Pruner `MedianPruner(n_warmup_steps=2, n_min_trials=5)`** — default en `tune()`. `trial.report` por fold + `should_prune` corta trials malos temprano.
+- [x] **G4. Walk-forward dentro del trial** — `k_folds` expanding-window con `purge` derivado de `max(horizons)`. Promedio de las métricas de los folds → métrica final del trial.
+- [x] **G5. Storage SQLite** — `tune(..., storage="sqlite:///optuna_studies/<study>.db")` con `load_if_exists`. Cubierto por `test_tune_sqlite_storage_round_trip`.
+- [x] **G6. Estrategia DDP/trial** — cada trial corre single-GPU/CPU (no DDP) por diseño del `Trainer`; Optuna paraleliza con `n_jobs=k` expuesto en el CLI.
+- [x] **G7. Tuner XGBoost** — `XGBoostMetaLearnerObjective` con `early_stopping_rounds` + reporte por fold para que `MedianPruner` corte trials malos. Tunea `n_estimators`, `learning_rate`, `max_depth`, `subsample`, `colsample_bytree`, `min_child_weight`.
+- [x] **G8. CLI `scripts/tune.py`** — `--target {backbone,xgboost}`, `--study-name`, `--n-trials`, `--storage`, `--n-jobs`. Para backbone reusa los flags de `scripts/train.py` (`--db`, `--symbol`, `--window-size`, `--horizons`, `--contracts`). Para xgboost toma `--xgb-X`/`--xgb-y` desde `.npy`/`.npz`.
+- [x] **G9. Tests** — 9 nuevos con `RandomSampler` + `n_trials=2` + `k_folds=2` + `max_epochs=1`. Cubren: sampling del `SearchSpace`, ambos targets (brier/val_loss), prune por dataset chico, prune via MedianPruner, persistencia SQLite con resume, y smoke de ambos modos del CLI.

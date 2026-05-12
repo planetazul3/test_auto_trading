@@ -16,19 +16,37 @@ from .ddp import (
 )
 from .losses import MultiContractLoss
 from .trainer import Trainer, TrainState
+from .tuning import (
+    BackboneObjective,
+    Categorical,
+    FloatRange,
+    IntRange,
+    SearchSpace,
+    XGBoostMetaLearnerObjective,
+    XGBoostSearchSpace,
+    tune,
+)
 
 __all__ = [
+    "BackboneObjective",
+    "Categorical",
     "DataConfig",
     "DeviceConfig",
+    "FloatRange",
+    "IntRange",
     "ModelConfig",
     "MultiContractLoss",
     "OptimizerConfig",
+    "SearchSpace",
     "TrainState",
     "Trainer",
     "TrainingConfig",
+    "XGBoostMetaLearnerObjective",
+    "XGBoostSearchSpace",
     "detect_device_strategy",
     "init_distributed",
     "is_main_process",
     "shutdown_distributed",
+    "tune",
     "world_size_and_rank",
 ]
