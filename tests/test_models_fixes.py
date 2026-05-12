@@ -359,7 +359,8 @@ def test_hybrid_signal_engine_bf16_autocast_inference() -> None:
     out_fp32 = engine.extract_features(x, as_numpy=False)["logits"]
 
     with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-        out_bf16 = engine.extract_features(x, as_numpy=False)["logits"]
+        with torch.backends.mkldnn.flags(enabled=False):
+            out_bf16 = engine.extract_features(x, as_numpy=False)["logits"]
     torch.testing.assert_close(
         out_bf16.float(), out_fp32, rtol=2e-2, atol=2e-2,
     )
