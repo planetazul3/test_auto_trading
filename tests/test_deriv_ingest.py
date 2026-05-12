@@ -19,7 +19,6 @@ from src.connectors.deriv import (
     MarketDataIngester,
     TickRow,
 )
-from src.connectors.deriv.exceptions import DerivAPIError
 
 
 # ---------------------------------------------------------------------------

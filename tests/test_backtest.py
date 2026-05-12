@@ -20,11 +20,8 @@ import torch.nn as nn
 from src.backtest.engine import (
     BacktestConfig,
     BacktestEngine,
-    BacktestResult,
-    TradeEvent,
 )
 from src.backtest.metrics import (
-    BacktestMetrics,
     compute_metrics,
     max_drawdown,
     profit_factor,

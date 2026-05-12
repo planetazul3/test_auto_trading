@@ -18,7 +18,7 @@ from src.data.store_adapter import StoreView
 from src.models.calibration_bundle import PerContractCalibratorBundle
 from src.models.conditioning import AssetTimeframeEmbedding
 from src.models.ensemble import SignalPolicy
-from src.risk import RiskConfig, RiskDecision, RiskManager
+from src.risk import RiskConfig, RiskManager
 
 
 # ---------------------------------------------------------------------------

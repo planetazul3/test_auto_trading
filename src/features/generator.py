@@ -10,7 +10,10 @@ auto-skipean via ``tests/conftest.py``.
 """
 import pandas as pd
 import numpy as np
-import pandas_ta as ta  # requires-python: 3.12+ via wheels; instalar con [legacy-features]
+# Import is side-effecting: pandas-ta registra el accessor `df.ta` al importarse,
+# y todo el módulo lo consume a través de `data.ta.*` (no como nombre directo).
+# ruff F401 lo marcaría como unused — pero borrarlo rompe la suite legacy.
+import pandas_ta as ta  # noqa: F401
 from numba import njit
 from sklearn.mixture import GaussianMixture
 import warnings

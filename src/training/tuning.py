@@ -38,18 +38,11 @@ import xgboost as xgb
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from src.data.dataset import collate_window_samples
-from src.data.labels import IGNORE_LABEL
-from src.data.sampler import purged_split
 from src.models.calibration_bundle import PerContractCalibratorBundle
-from src.models.composite import BackboneWithHeads, build_model_from_config
+from src.models.composite import build_model_from_config
 from src.models.conditioning import AssetTimeframeEmbedding
 from src.models.heads import HeadConfig
-from src.models.meta_learner import RegimeAwareMetaLearner
 from src.training.config import (
-    DataConfig,
-    DeviceConfig,
-    ModelConfig,
-    OptimizerConfig,
     TrainingConfig,
 )
 from src.training.losses import MultiContractLoss

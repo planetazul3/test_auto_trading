@@ -41,7 +41,6 @@ from src.connectors.deriv.client import DerivWebSocketClient
 from src.data.features import (
     CandleFeatureBuilder,
     FeatureBuilderConfig,
-    TickFeatureBuilder,
     build_feature_builder,
 )
 from src.models.calibration_bundle import PerContractCalibratorBundle

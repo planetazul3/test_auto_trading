@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional
 
 from src.data.features import FeatureBuilderConfig
 from src.models.heads import DERIV_BINARY_CONTRACTS, HeadConfig

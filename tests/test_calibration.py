@@ -28,8 +28,8 @@ def test_calibrator_monotonic_after_fit():
     rng = np.random.default_rng(1)
     for _ in range(1500):
         m = float(rng.standard_normal())
-        l = int(m + 0.3 * rng.standard_normal() > 0)
-        cal.add_observation(m, l)
+        lbl = int(m + 0.3 * rng.standard_normal() > 0)
+        cal.add_observation(m, lbl)
     cal.update_calibration_curve()
     grid = np.linspace(-3, 3, 100)
     probs = np.array([cal.calibrate_signal(float(x)) for x in grid])

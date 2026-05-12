@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from src.models.calibration_bundle import PerContractCalibratorBundle
-from src.models.drift import DriftDecision, OnlineCalibrationMonitor
+from src.models.drift import OnlineCalibrationMonitor
 
 
 # ---------------------------------------------------------------------------

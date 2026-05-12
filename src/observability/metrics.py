@@ -24,7 +24,7 @@ Para exponer un endpoint HTTP scrapeable:
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Optional
 
 log = logging.getLogger(__name__)
 

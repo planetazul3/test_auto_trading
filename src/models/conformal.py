@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Sequence
 
 import numpy as np
 

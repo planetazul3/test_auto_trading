@@ -38,7 +38,6 @@ from src.training.config import TrainingConfig
 from src.training.ddp import (
     detect_device_strategy,
     is_main_process,
-    world_size_and_rank,
 )
 
 

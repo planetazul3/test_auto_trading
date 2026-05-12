@@ -27,7 +27,7 @@ API mínima:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from src.models.calibration_bundle import PerContractCalibratorBundle

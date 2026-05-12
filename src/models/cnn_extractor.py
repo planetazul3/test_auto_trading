@@ -21,7 +21,7 @@ Diseño:
 from __future__ import annotations
 
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn

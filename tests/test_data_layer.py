@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 import pandas as pd
@@ -17,7 +16,6 @@ from src.data.dataset import (
 )
 from src.data.features import (
     CandleFeatureBuilder,
-    FeatureBuilderConfig,
     TickFeatureBuilder,
     build_feature_builder,
 )

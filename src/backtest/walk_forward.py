@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import torch

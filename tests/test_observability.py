@@ -20,7 +20,6 @@ from src.observability.metrics import (
     HAS_PROMETHEUS,
     MetricsRegistry,
     inference_latency_seconds,
-    metrics_registry,
     signals_emitted_total,
     train_loss,
 )

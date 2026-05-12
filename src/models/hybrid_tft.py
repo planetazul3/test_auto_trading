@@ -15,7 +15,7 @@ Cambios respecto a la versión anterior:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple, Union
+from typing import Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
