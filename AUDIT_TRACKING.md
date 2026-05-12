@@ -199,8 +199,19 @@ Leyenda:
   - Upload de pytest cache en failure.
   - Job `lint` con `ruff==0.1.15` sobre `src/ tests/ scripts/`.
   - `concurrency` cancela jobs viejos al pushear.
-- [ ] **F3.** Pre-commit hooks (ruff + mypy strict en `src/`).
-- [ ] **F4.** Benchmarks de latencia de `generate_signal` (target p99 < 5ms en CPU).
+- [x] **F3. Pre-commit hooks.** `.pre-commit-config.yaml` con:
+  - `pre-commit-hooks` v4.6.0: trailing-whitespace, end-of-file-fixer, check-merge-conflict, check-yaml, check-toml, check-json, check-added-large-files (cap 2 MB), detect-private-key.
+  - `ruff` v0.1.15 (mismo pin que `[dev]`) con `--fix --exit-non-zero-on-fix`.
+  - `mypy` v1.8.0 sobre `src/` con `--check-untyped-defs --ignore-missing-imports`; dependencies adicionales numpy<2, pandas 2.2, pydantic 2.6 inyectadas para que el type-check no falle por imports faltantes.
+  - Bloque `ci:` con mensajes de commit estandarizados (`autofix_commit_msg` y `autoupdate_commit_msg`).
+- [x] **F4. Benchmarks de latencia.** `scripts/benchmark_inference.py`:
+  - Mide latencia end-to-end del pipeline `(W, F) → BackboneWithHeads → calibrate → SignalPolicy` por iteración con `torch.inference_mode` y `cuda.synchronize` cuando aplica.
+  - Reporta p50/p95/p99/mean/stdev/min/max en milisegundos via `BenchmarkReport` dataclass.
+  - Modos `--mode forward|full` (con/sin calibrator + policy).
+  - Target **p99 < 5ms** documentado; `--target-p99-ms` parametrizable; `--fail-on-regression` retorna exit code 1 si supera el target (gating para CI).
+  - `--json` para integración con dashboards de regresión.
+  - Warmup de 30-50 iteraciones para excluir JIT/cuDNN tuning.
+  5 tests smoke: shapes del reporte, modos forward vs full, validaciones, CLI JSON output, exit-code-1 con target imposible.
 
 ### Hyperparameter tuning (Optuna)
 
