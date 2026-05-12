@@ -155,8 +155,8 @@ Leyenda:
 ## Lo que aún falta (roadmap inmediato)
 
 ### Capa de aplicación / serving
-- [ ] **A1. Live inference loop**: consumir ticks desde `DerivWebSocketConnector`, mantener ventana rodante, llamar `engine.generate_signal()` en streaming y publicar señales (Redis Stream o socket).
-- [ ] **A2. Backtester walk-forward**: simular fills usando históricos del DuckDB, evaluar PnL por contrato y por régimen.
+- [x] **A1. Live inference loop** *(entregado en `5640462`)* — `scripts/infer.py` consume ticks de `DerivWebSocketClient.ticks_history_stream`, mantiene ventana rodante con el `FeatureBuilder` correcto, calibra con `PerContractCalibratorBundle`, aplica `SignalPolicy` y emite JSON por stdout. Soporta `--max-iterations` para CI.
+- [x] **A2. Backtester walk-forward** — `src/backtest/` con `engine.py` (event-driven simulator binario con payout/commission/sizing), `metrics.py` (Sharpe, Sortino, max drawdown + duration, profit factor, win rate, breakdown por contrato + annualization factor), `walk_forward.py` (orquestrador expanding/rolling con purga y embargo entre train/val/test). CLI `scripts/backtest.py` con modos `walk-forward` y `static`. 18 tests cubriendo métricas analíticas, engine determinístico (CALL/PUT/NO_TRADE/masked), aritmética de PnL exacta, walk-forward ranges y CLI smoke end-to-end.
 - [ ] **A3. Risk manager**: límite por contrato/símbolo/régimen, kill-switch por drawdown, exposure cap.
 
 ### Calibración / post-procesado
