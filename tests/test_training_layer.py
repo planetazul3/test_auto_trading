@@ -44,6 +44,48 @@ def test_training_config_serializes_to_json() -> None:
     assert '"epochs": 5' in js
 
 
+def test_training_config_round_trip_json(tmp_path) -> None:
+    cfg = TrainingConfig(
+        epochs=7,
+        model=ModelConfig(embedding_dim=32, num_attention_heads=4, cnn_channels=(8, 16)),
+        data=DataConfig(window_size=20, horizons=(1, 3), contracts=("CALLPUT",), batch_size=8),
+        optimizer=OptimizerConfig(lr=5e-4, lr_scheduler="cosine", warmup_steps=10),
+        device=DeviceConfig(strategy="cpu", precision="bf16", seed=123),
+    )
+    path = tmp_path / "cfg.json"
+    cfg.to_file(path)
+    loaded = TrainingConfig.from_file(path)
+    assert loaded == cfg
+
+
+def test_training_config_round_trip_yaml(tmp_path) -> None:
+    cfg = TrainingConfig(
+        epochs=2,
+        data=DataConfig(window_size=15, horizons=(1, 2, 5), contracts=("CALLPUT", "HIGHERLOWER")),
+        device=DeviceConfig(strategy="cpu"),
+    )
+    path = tmp_path / "cfg.yaml"
+    cfg.to_file(path)
+    loaded = TrainingConfig.from_file(path)
+    assert loaded == cfg
+
+
+def test_training_config_from_dict_partial_uses_dataclass_defaults() -> None:
+    cfg = TrainingConfig.from_dict({"epochs": 3, "data": {"batch_size": 32}})
+    assert cfg.epochs == 3
+    assert cfg.data.batch_size == 32
+    # Defaults preservados.
+    assert cfg.data.window_size == 60
+    assert cfg.optimizer.lr == 3e-4
+
+
+def test_training_config_from_file_rejects_unknown_extension(tmp_path) -> None:
+    path = tmp_path / "cfg.toml"
+    path.write_text("ignored")
+    with pytest.raises(ValueError, match="extension"):
+        TrainingConfig.from_file(path)
+
+
 def test_model_config_rejects_indivisible_dims() -> None:
     with pytest.raises(ValueError):
         ModelConfig(embedding_dim=10, num_attention_heads=4)

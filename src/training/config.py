@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from src.data.features import FeatureBuilderConfig
@@ -179,6 +180,116 @@ class TrainingConfig:
                 return dataclasses.asdict(o)
             return str(o)
         return json.dumps(dataclasses.asdict(self), default=_default, indent=2)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    def to_file(self, path: str | Path) -> None:
+        p = Path(path)
+        payload = self.to_dict()
+        if p.suffix in (".yaml", ".yml"):
+            import yaml  # type: ignore[import-untyped]
+            p.write_text(yaml.safe_dump(payload, sort_keys=False))
+        elif p.suffix == ".json":
+            p.write_text(json.dumps(payload, indent=2))
+        else:
+            raise ValueError(f"unsupported config extension: {p.suffix!r}")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TrainingConfig":
+        return _build_training_config(payload)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "TrainingConfig":
+        p = Path(path)
+        text = p.read_text()
+        if p.suffix in (".yaml", ".yml"):
+            import yaml  # type: ignore[import-untyped]
+            payload = yaml.safe_load(text)
+        elif p.suffix == ".json":
+            payload = json.loads(text)
+        else:
+            raise ValueError(f"unsupported config extension: {p.suffix!r}")
+        if not isinstance(payload, dict):
+            raise ValueError("config file must parse to a mapping at top level")
+        return cls.from_dict(payload)
+
+
+# ---------------------------------------------------------------------------
+# Recursive builders (handle nested dataclasses + tuple coercion from YAML/JSON)
+# ---------------------------------------------------------------------------
+
+
+def _as_tuple(value: Any) -> tuple:
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return value
+    if isinstance(value, list):
+        return tuple(value)
+    raise TypeError(f"expected list/tuple, got {type(value).__name__}")
+
+
+def _build_head_config(payload: dict[str, Any]) -> HeadConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    if "contracts" in kwargs:
+        kwargs["contracts"] = _as_tuple(kwargs["contracts"])
+    if "horizons" in kwargs:
+        kwargs["horizons"] = _as_tuple(kwargs["horizons"])
+    return HeadConfig(**kwargs)
+
+
+def _build_model_config(payload: dict[str, Any]) -> ModelConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    for k in ("cnn_channels", "cnn_kernel_sizes", "cnn_dilations"):
+        if k in kwargs:
+            kwargs[k] = _as_tuple(kwargs[k])
+    if "head" in kwargs and isinstance(kwargs["head"], dict):
+        kwargs["head"] = _build_head_config(kwargs["head"])
+    return ModelConfig(**kwargs)
+
+
+def _build_feature_builder_config(payload: dict[str, Any]) -> FeatureBuilderConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    for k in ("return_windows", "volatility_windows", "momentum_windows"):
+        if k in kwargs:
+            kwargs[k] = _as_tuple(kwargs[k])
+    return FeatureBuilderConfig(**kwargs)
+
+
+def _build_data_config(payload: dict[str, Any]) -> DataConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    if "horizons" in kwargs:
+        kwargs["horizons"] = _as_tuple(kwargs["horizons"])
+    if "contracts" in kwargs:
+        kwargs["contracts"] = _as_tuple(kwargs["contracts"])
+    if "feature_builder" in kwargs and isinstance(kwargs["feature_builder"], dict):
+        kwargs["feature_builder"] = _build_feature_builder_config(kwargs["feature_builder"])
+    return DataConfig(**kwargs)
+
+
+def _build_optimizer_config(payload: dict[str, Any]) -> OptimizerConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    if "betas" in kwargs:
+        kwargs["betas"] = _as_tuple(kwargs["betas"])
+    return OptimizerConfig(**kwargs)
+
+
+def _build_device_config(payload: dict[str, Any]) -> DeviceConfig:
+    return DeviceConfig(**payload)
+
+
+def _build_training_config(payload: dict[str, Any]) -> TrainingConfig:
+    kwargs: dict[str, Any] = dict(payload)
+    if "model" in kwargs and isinstance(kwargs["model"], dict):
+        kwargs["model"] = _build_model_config(kwargs["model"])
+    if "data" in kwargs and isinstance(kwargs["data"], dict):
+        kwargs["data"] = _build_data_config(kwargs["data"])
+    if "optimizer" in kwargs and isinstance(kwargs["optimizer"], dict):
+        kwargs["optimizer"] = _build_optimizer_config(kwargs["optimizer"])
+    if "device" in kwargs and isinstance(kwargs["device"], dict):
+        kwargs["device"] = _build_device_config(kwargs["device"])
+    return TrainingConfig(**kwargs)
 
 
 __all__ = [
