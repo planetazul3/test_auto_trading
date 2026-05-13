@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Iterator, Mapping, Optional
 
 from src.models.calibration_bundle import PerContractCalibratorBundle
 
@@ -231,7 +231,7 @@ class OnlineCalibrationMonitor:
     # Helpers privados
     # ------------------------------------------------------------------
 
-    def _iter_cells(self, bundle: PerContractCalibratorBundle):
+    def _iter_cells(self, bundle: PerContractCalibratorBundle) -> Iterator[str]:
         for c in bundle.contracts:
             for h in bundle.horizons:
                 yield f"{c}__h{int(h)}"

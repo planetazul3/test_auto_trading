@@ -20,8 +20,8 @@ Cero hardcodes: las ventanas, columnas y horizontes vienen del config.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -96,7 +96,6 @@ class CandleFeatureBuilder(BaseFeatureBuilder):
             if col not in df.columns:
                 raise ValueError(f"missing required column {col!r}")
         cfg = self.config
-        n = len(df)
         out: list[np.ndarray] = []
         names: list[str] = []
 
@@ -147,7 +146,7 @@ class CandleFeatureBuilder(BaseFeatureBuilder):
         out.append(np.clip(z, -10.0, 10.0))
         names.append("close_zscore")
 
-        feats = np.stack(out, axis=1).astype(np.float32)
+        feats: np.ndarray = np.stack(out, axis=1).astype(np.float32)
         self._feature_names = names
         return feats
 
@@ -170,7 +169,6 @@ class TickFeatureBuilder(BaseFeatureBuilder):
             if col not in df.columns:
                 raise ValueError(f"missing required column {col!r}")
         cfg = self.config
-        n = len(df)
         out: list[np.ndarray] = []
         names: list[str] = []
 
@@ -215,7 +213,7 @@ class TickFeatureBuilder(BaseFeatureBuilder):
         out.append(np.clip(z, -10.0, 10.0))
         names.append("quote_zscore")
 
-        feats = np.stack(out, axis=1).astype(np.float32)
+        feats: np.ndarray = np.stack(out, axis=1).astype(np.float32)
         self._feature_names = names
         return feats
 

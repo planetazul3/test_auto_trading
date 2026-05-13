@@ -29,7 +29,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from .client import CANDLE_GRANULARITIES, DerivWebSocketClient
 from .exceptions import (
@@ -508,7 +508,7 @@ class MarketDataIngester:
                     result = await fn(*args, **kwargs)
                 if self._limiter.on_success():
                     self._sync_rate_to_client()
-                return result
+                return cast(dict[str, Any], result)
             except DerivAuthError:
                 raise  # nunca tiene sentido reintentar
             except DerivRateLimitError as exc:

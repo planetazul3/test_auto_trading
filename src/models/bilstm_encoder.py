@@ -21,7 +21,7 @@ Diseño:
 
 from __future__ import annotations
 
-from typing import Optional, overload
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -157,16 +157,7 @@ class BiLSTMEncoder(nn.Module):
                     n = param.size(0)
                     param.data[n // 4 : n // 2].fill_(1.0)
 
-    @overload
     def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        lengths: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor: ...
-
-    def forward(  # type: ignore[no-redef]
         self,
         x: torch.Tensor,
         *,
@@ -190,11 +181,13 @@ class BiLSTMEncoder(nn.Module):
 
         if self.return_sequence:
             assert self.step_head is not None
-            return self.step_head(out)
+            seq_out: torch.Tensor = self.step_head(out)
+            return seq_out
 
         assert self.attention is not None and self.head is not None
         context = self.attention(out, key_padding_mask=key_padding_mask)
-        return self.head(context)
+        head_out: torch.Tensor = self.head(context)
+        return head_out
 
 
 __all__ = ["AttentionPooling", "BiLSTMEncoder"]

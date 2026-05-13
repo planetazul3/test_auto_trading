@@ -38,11 +38,11 @@ try:  # pragma: no cover - dependencia opcional
     )
     HAS_PROMETHEUS = True
 except ImportError:  # pragma: no cover
-    _prom = None
-    _CollectorRegistry = object
-    _Counter = None  # type: ignore[assignment]
-    _Gauge = None    # type: ignore[assignment]
-    _Histogram = None  # type: ignore[assignment]
+    _prom = None  # type: ignore[assignment]
+    _CollectorRegistry = object  # type: ignore[assignment,misc]
+    _Counter = None  # type: ignore[assignment,misc]
+    _Gauge = None    # type: ignore[assignment,misc]
+    _Histogram = None  # type: ignore[assignment,misc]
     HAS_PROMETHEUS = False
 
 
@@ -54,10 +54,10 @@ except ImportError:  # pragma: no cover
 class _NoOpMetric:
     """Stub silencioso compatible con la API de Counter/Gauge/Histogram."""
 
-    def __init__(self, name: str, *_, **__) -> None:
+    def __init__(self, name: str, *_: Any, **__: Any) -> None:
         self.name = name
 
-    def labels(self, *args, **kwargs) -> "_NoOpMetric":  # noqa: D401
+    def labels(self, *args: Any, **kwargs: Any) -> "_NoOpMetric":  # noqa: D401
         return self
 
     def inc(self, amount: float = 1.0) -> None:
@@ -72,10 +72,13 @@ class _NoOpMetric:
     def observe(self, value: float) -> None:
         pass
 
-    def time(self):
+    def time(self) -> Any:
         class _Ctx:
-            def __enter__(self_inner): return self_inner
-            def __exit__(self_inner, *a): return False
+            def __enter__(self_inner: "_Ctx") -> "_Ctx":
+                return self_inner
+
+            def __exit__(self_inner: "_Ctx", *a: Any) -> None:
+                return None
         return _Ctx()
 
 
@@ -89,10 +92,9 @@ class MetricsRegistry:
 
     def __init__(self, *, namespace: str = "ml_signal_engine") -> None:
         self.namespace = namespace
-        if HAS_PROMETHEUS:
-            self._registry: _CollectorRegistry = _CollectorRegistry()
-        else:
-            self._registry = None
+        self._registry: Optional[Any] = (
+            _CollectorRegistry() if HAS_PROMETHEUS else None
+        )
         self._metrics: dict[str, Any] = {}
 
     @property
@@ -178,8 +180,9 @@ class MetricsRegistry:
     # ------------------------------------------------------------------
 
     def start_http_server(self, port: int = 9090, addr: str = "0.0.0.0") -> bool:
-        if not HAS_PROMETHEUS:
+        if not HAS_PROMETHEUS or self._registry is None:
             return False
+        assert _prom is not None
         _prom.start_http_server(port, addr=addr, registry=self._registry)
         return True
 
@@ -225,6 +228,9 @@ signals_emitted_total = metrics_registry.counter(
 # Exponer los símbolos del módulo prom (si están) o los stubs equivalentes
 # como ``Counter``/`Gauge`/`Histogram` para que código de usuario haga
 # `from src.observability.metrics import Counter` sin depender del flag.
+Counter: Any
+Gauge: Any
+Histogram: Any
 if HAS_PROMETHEUS:
     Counter = _Counter
     Gauge = _Gauge

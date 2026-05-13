@@ -106,7 +106,7 @@ def _coerce(value: Any) -> Any:
 def configure_root(
     *,
     level: int = logging.INFO,
-    stream=None,
+    stream: Optional[Any] = None,
     json_format: bool = True,
 ) -> None:
     """Configura ``logging.root`` con un handler stdout. Idempotente.

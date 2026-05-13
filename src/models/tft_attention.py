@@ -42,7 +42,8 @@ class GatedLinearUnit(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         value, gate = self.fc(x).chunk(2, dim=-1)
-        return value * torch.sigmoid(gate)
+        out: torch.Tensor = value * torch.sigmoid(gate)
+        return out
 
 
 class GatedResidualNetwork(nn.Module):
@@ -101,7 +102,8 @@ class GatedResidualNetwork(nn.Module):
         h = self.fc2(h)
         h = self.dropout(h)
         h = self.glu(h)
-        return self.layer_norm(h + residual)
+        out: torch.Tensor = self.layer_norm(h + residual)
+        return out
 
 
 class TFTFusionNode(nn.Module):

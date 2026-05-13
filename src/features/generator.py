@@ -62,7 +62,7 @@ def _fast_hurst(x: np.ndarray) -> float:
         return 0.0
     if h > 1.0:
         return 1.0
-    return h
+    return float(h)
 
 
 @njit
@@ -140,7 +140,7 @@ class FeatureGenerator:
         """
         self._validate_data(df)
         data = df.copy()
-        
+
         # Diccionario para coleccionar nuevas columnas y evitar fragmentación
         f = {}
 
@@ -152,7 +152,7 @@ class FeatureGenerator:
         f['SMA_20'] = data.ta.sma(length=20)
         f['DEMA_20'] = data.ta.dema(length=20)
         f['TEMA_20'] = data.ta.tema(length=20)
-        
+
         # Ichimoku con lookahead=False: pandas_ta por defecto desplaza Senkou
         # Span A/B 26 períodos hacia adelante, lo que introduce look-ahead.
         ichi = data.ta.ichimoku(lookahead=False)
@@ -187,13 +187,13 @@ class FeatureGenerator:
         f['OBV'] = data.ta.obv()
         f['VWAP'] = data.ta.vwap()
         f['CMF'] = data.ta.cmf()
-        
+
         if self.use_causal_zscore:
             f['volume_zscore'] = self.safe_causal_zscore(data['volume'], self.window).rename('volume_zscore')
         else:
             vol_roll = data['volume'].rolling(20)
             f['volume_zscore'] = ((data['volume'] - vol_roll.mean()) / vol_roll.std()).rename('volume_zscore')
-        
+
         f['volume_ratio'] = (data['volume'] / data['volume'].rolling(20).mean()).rename('volume_ratio')
 
         # 5. MICROESTRUCTURA
@@ -207,7 +207,7 @@ class FeatureGenerator:
         else:
             close_roll = data['close'].rolling(20)
             f['price_zscore_20'] = ((data['close'] - close_roll.mean()) / close_roll.std()).rename('price_zscore_20')
-            
+
         f['realized_volatility'] = (data['close'].pct_change().rolling(20).std() * np.sqrt(252 * 288)).rename('realized_volatility')
         f['hurst_exponent'] = self._calculate_hurst(data['close'], window=20).rename('hurst_exponent')
 

@@ -312,8 +312,9 @@ class BackboneObjective:
         )
 
 
-def _forward_fn(model, batch):
-    return model(batch["features"], batch["symbol_id"], batch["granularity_id"])
+def _forward_fn(model: torch.nn.Module, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    out: torch.Tensor = model(batch["features"], batch["symbol_id"], batch["granularity_id"])
+    return out
 
 
 def _brier_post_calibration(

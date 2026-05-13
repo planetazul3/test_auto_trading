@@ -13,7 +13,7 @@ import base64
 import hashlib
 import secrets
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.parse import urlencode
 
 DEFAULT_AUTH_URL = "https://auth.deriv.com/oauth2/auth"
@@ -176,7 +176,7 @@ class DerivOAuth2:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
 
 class DerivOTPClient:
@@ -212,7 +212,7 @@ class DerivOTPClient:
             headers=self._headers,
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
     async def create_account(
         self,
@@ -233,7 +233,7 @@ class DerivOTPClient:
             },
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
     async def reset_demo_balance(self, account_id: str) -> dict[str, Any]:
         response = await self.http.post(
@@ -241,7 +241,7 @@ class DerivOTPClient:
             headers=self._headers,
         )
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())
 
     async def request_otp(self, account_id: str) -> str:
         """Solicita un OTP y devuelve la URL WebSocket lista para conectar."""
@@ -259,4 +259,4 @@ class DerivOTPClient:
     async def health(self) -> dict[str, Any]:
         response = await self.http.get(f"{self.base_url}/v1/health")
         response.raise_for_status()
-        return response.json()
+        return cast(dict[str, Any], response.json())

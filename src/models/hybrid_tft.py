@@ -115,7 +115,8 @@ class HybridCNNLSTMTFT(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         cnn_seq = self.cnn_extractor(x)
         lstm_seq = self.lstm_encoder(x)
-        return self.tft_fusion([cnn_seq, lstm_seq])
+        fused, attn = self.tft_fusion([cnn_seq, lstm_seq])
+        return fused, attn
 
     def extract_embedding(
         self,
@@ -129,7 +130,7 @@ class HybridCNNLSTMTFT(nn.Module):
         del nodo TFT.
         """
         fused_seq, attn = self._encode_sequence(x)
-        emb = self.output_grn(fused_seq[:, -1, :])
+        emb: torch.Tensor = self.output_grn(fused_seq[:, -1, :])
         if return_attn:
             return emb, attn
         return emb

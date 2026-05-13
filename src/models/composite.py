@@ -28,7 +28,7 @@ todo a partir de la dataclass.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -96,7 +96,7 @@ class BackboneWithHeads(nn.Module):
         features: torch.Tensor,
         *,
         return_attn: bool = False,
-    ):
+    ) -> Any:
         return self.backbone.extract_embedding(features, return_attn=return_attn)
 
     def forward(
@@ -113,8 +113,10 @@ class BackboneWithHeads(nn.Module):
                     "head.config.use_context=True"
                 )
             ctx = self.context(symbol_id, granularity_id)
-            return self.head(emb, ctx)
-        return self.head(emb)
+            head_ctx: torch.Tensor = self.head(emb, ctx)
+            return head_ctx
+        head_noctx: torch.Tensor = self.head(emb)
+        return head_noctx
 
     # ------------------------------------------------------------------
     # Convenience
@@ -137,7 +139,7 @@ class BackboneWithHeads(nn.Module):
 
 
 def build_model_from_config(
-    cfg,                                # training.config.ModelConfig (avoid circular import)
+    cfg: Any,                           # training.config.ModelConfig (avoid circular import)
     *,
     num_features: int,
     sequence_length: int,

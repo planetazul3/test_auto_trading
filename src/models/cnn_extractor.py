@@ -48,7 +48,8 @@ class ChannelLayerNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, L). LayerNorm espera el eje de features al final.
-        return self.norm(x.transpose(1, 2)).transpose(1, 2)
+        out: torch.Tensor = self.norm(x.transpose(1, 2)).transpose(1, 2)
+        return out
 
 
 class CausalConv1d(nn.Conv1d):
@@ -219,10 +220,12 @@ class CNN1DExtractor(nn.Module):
 
         if self.return_sequence:
             assert self.step_head is not None
-            return self.step_head(h.transpose(1, 2))
+            seq_out: torch.Tensor = self.step_head(h.transpose(1, 2))
+            return seq_out
         assert self.global_pool is not None and self.head is not None
         pooled = self.global_pool(h).flatten(start_dim=1)
-        return self.head(pooled)
+        head_out: torch.Tensor = self.head(pooled)
+        return head_out
 
 
 __all__ = ["CNN1DExtractor", "CausalConv1d", "ChannelLayerNorm"]

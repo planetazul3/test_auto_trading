@@ -34,7 +34,7 @@ import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
 
-from src.training.config import TrainingConfig
+from src.training.config import OptimizerConfig, TrainingConfig
 from src.training.ddp import (
     detect_device_strategy,
     is_main_process,
@@ -180,7 +180,7 @@ class Trainer:
             return torch.device(f"cuda:{local_rank}")
         return torch.device("cpu")
 
-    def _build_scheduler(self) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
+    def _build_scheduler(self) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
         cfg = self.config.optimizer
         if cfg.lr_scheduler is None:
             return None
@@ -264,7 +264,7 @@ class Trainer:
         avg = running_loss / max(1, n_batches)
         return {"train_loss": avg}
 
-    def _optimizer_step(self, cfg) -> None:
+    def _optimizer_step(self, cfg: OptimizerConfig) -> None:
         if cfg.grad_clip_norm is not None:
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)

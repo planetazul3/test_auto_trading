@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from src.data.features import FeatureBuilderConfig
 from src.models.heads import DERIV_BINARY_CONTRACTS, HeadConfig
@@ -174,8 +174,8 @@ class TrainingConfig:
             raise ValueError("early_stopping_patience must be > 0 or None")
 
     def to_json(self) -> str:
-        def _default(o):
-            if dataclasses.is_dataclass(o):
+        def _default(o: Any) -> Any:
+            if dataclasses.is_dataclass(o) and not isinstance(o, type):
                 return dataclasses.asdict(o)
             return str(o)
         return json.dumps(dataclasses.asdict(self), default=_default, indent=2)

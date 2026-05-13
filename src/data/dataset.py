@@ -25,10 +25,9 @@ TOUCH/NOTOUCH…) con su lista de horizontes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, NamedTuple, Optional, Sequence
+from typing import Any, Iterable, NamedTuple, Optional, Sequence
 
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import ConcatDataset, Dataset
 
@@ -220,7 +219,8 @@ class WindowDataset(Dataset[WindowSample]):
 
     @property
     def anchor_epochs(self) -> np.ndarray:
-        return self._epochs[self._anchor_indices]
+        result: np.ndarray = self._epochs[self._anchor_indices]
+        return result
 
 
 class MultiSymbolWindowDataset(ConcatDataset):
@@ -266,7 +266,7 @@ class MultiSymbolWindowDataset(ConcatDataset):
 
     @property
     def sub_datasets(self) -> list[WindowDataset]:
-        return list(self.datasets)  # type: ignore[return-value]
+        return list(self.datasets)  # type: ignore[arg-type,return-value]
 
 
 def collate_window_samples(batch: Sequence[WindowSample]) -> dict[str, torch.Tensor]:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Iterator, Optional, Sequence
 
 import numpy as np
 import torch
@@ -102,12 +102,12 @@ class WalkForwardResult:
         all_returns = np.concatenate(
             [f.backtest.total_returns() for f in self.folds]
         ) if self.folds else np.empty(0, dtype=np.float64)
-        per_contract: dict[str, np.ndarray] = {}
+        per_contract_lists: dict[str, list[np.ndarray]] = {}
         for f in self.folds:
             for contract, arr in f.backtest.returns_by_contract().items():
-                per_contract.setdefault(contract, []).append(arr)  # type: ignore[arg-type]
+                per_contract_lists.setdefault(contract, []).append(arr)
         per_contract_concat = {
-            k: np.concatenate(v) for k, v in per_contract.items()  # type: ignore[arg-type]
+            k: np.concatenate(v) for k, v in per_contract_lists.items()
         }
         return compute_metrics(
             all_returns, per_contract_returns=per_contract_concat
@@ -193,7 +193,7 @@ class WalkForwardOrchestrator:
             return int(self.cfg.purge)
         return int(max(self.horizons))
 
-    def _iter_folds(self):
+    def _iter_folds(self) -> Iterator[tuple[tuple[int, int], tuple[int, int], tuple[int, int]]]:
         n = len(self.dataset)  # type: ignore[arg-type]
         purge = self._effective_purge()
         embargo = int(self.cfg.embargo)

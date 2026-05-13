@@ -173,7 +173,9 @@ class DuckDBStore:
             for r in rows
         ]
         with self._lock:
-            before = self._conn.execute("SELECT count(*) FROM ticks").fetchone()[0]
+            row = self._conn.execute("SELECT count(*) FROM ticks").fetchone()
+            assert row is not None
+            before = row[0]
             self._conn.begin()
             try:
                 self._conn.executemany(
@@ -188,7 +190,9 @@ class DuckDBStore:
             except Exception:
                 self._conn.rollback()
                 raise
-            after = self._conn.execute("SELECT count(*) FROM ticks").fetchone()[0]
+            row = self._conn.execute("SELECT count(*) FROM ticks").fetchone()
+            assert row is not None
+            after = row[0]
             return int(after - before)
 
     def upsert_candles(self, rows: Sequence[CandleRow]) -> int:
@@ -199,7 +203,9 @@ class DuckDBStore:
             for r in rows
         ]
         with self._lock:
-            before = self._conn.execute("SELECT count(*) FROM candles").fetchone()[0]
+            row = self._conn.execute("SELECT count(*) FROM candles").fetchone()
+            assert row is not None
+            before = row[0]
             self._conn.begin()
             try:
                 self._conn.executemany(
@@ -219,7 +225,9 @@ class DuckDBStore:
             except Exception:
                 self._conn.rollback()
                 raise
-            after = self._conn.execute("SELECT count(*) FROM candles").fetchone()[0]
+            row = self._conn.execute("SELECT count(*) FROM candles").fetchone()
+            assert row is not None
+            after = row[0]
             return int(after - before)
 
     # ------------------------------------------------------------------
@@ -374,11 +382,11 @@ class DuckDBStore:
         if kind not in ("ticks", "candles"):
             raise ValueError("kind must be 'ticks' or 'candles'")
         with self._lock:
-            run_id = int(
-                self._conn.execute(
-                    "SELECT nextval('ingest_runs_seq')"
-                ).fetchone()[0]
-            )
+            row = self._conn.execute(
+                "SELECT nextval('ingest_runs_seq')"
+            ).fetchone()
+            assert row is not None
+            run_id = int(row[0])
             self._conn.execute(
                 """
                 INSERT INTO ingest_runs

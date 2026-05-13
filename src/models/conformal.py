@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
@@ -248,9 +248,9 @@ class ConformalBundle:
 
     def add_observations(
         self,
-        probs,
-        labels,
-        mask=None,
+        probs: Any,
+        labels: Any,
+        mask: Any = None,
     ) -> None:
         """``probs`` y ``labels`` con shape ``(B, C, H)``; ``mask`` opcional."""
         probs_np = _to_numpy(probs)
@@ -285,7 +285,7 @@ class ConformalBundle:
     # Inferencia vectorizada
     # ------------------------------------------------------------------
 
-    def predict_sets(self, probs) -> np.ndarray:
+    def predict_sets(self, probs: Any) -> np.ndarray:
         """``(B, C, H) → (B, C, H, 2)`` con [include_zero, include_one]."""
         probs_np = _to_numpy(probs)
         if probs_np.ndim != 3:
@@ -305,14 +305,14 @@ class ConformalBundle:
                 out[:, ci, hi, 1] = (1.0 - p_col) <= q  # include 1 si score_1 = 1-p <= q
         return out
 
-    def is_confident(self, probs) -> np.ndarray:
+    def is_confident(self, probs: Any) -> np.ndarray:
         """``(B, C, H) → (B, C, H) bool`` (single-element set)."""
         sets = self.predict_sets(probs)
         only_zero = sets[..., 0] & ~sets[..., 1]
         only_one = sets[..., 1] & ~sets[..., 0]
         return only_zero | only_one
 
-    def predicted_classes(self, probs) -> np.ndarray:
+    def predicted_classes(self, probs: Any) -> np.ndarray:
         """``(B, C, H) → (B, C, H) int``: 1=CALL, 0=PUT, -1=ambivalente/vacío."""
         sets = self.predict_sets(probs)
         out = np.full(sets.shape[:-1], -1, dtype=np.int8)
@@ -340,11 +340,12 @@ class ConformalBundle:
         return out
 
 
-def _to_numpy(x) -> np.ndarray:
+def _to_numpy(x: Any) -> np.ndarray:
     try:
         import torch
         if isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
+            out: np.ndarray = x.detach().cpu().numpy()
+            return out
     except ImportError:  # pragma: no cover
         pass
     return np.asarray(x)

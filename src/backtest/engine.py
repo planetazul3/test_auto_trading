@@ -42,6 +42,7 @@ from src.data.labels import IGNORE_LABEL
 from src.models.calibration_bundle import PerContractCalibratorBundle
 from src.models.conformal import ConformalBundle
 from src.models.ensemble import SignalPolicy
+from src.risk.manager import RiskManager
 
 
 @dataclass(frozen=True)
@@ -148,7 +149,7 @@ class BacktestEngine:
         config: Optional[BacktestConfig] = None,
         device: Optional[torch.device] = None,
         conformal_gate: Optional[ConformalBundle] = None,
-        risk_manager: Optional["object"] = None,
+        risk_manager: Optional[RiskManager] = None,
     ) -> None:
         if len(contracts) == 0 or len(horizons) == 0:
             raise ValueError("contracts and horizons must be non-empty")
@@ -185,7 +186,7 @@ class BacktestEngine:
     # Batch handler
     # ------------------------------------------------------------------
 
-    def _run_batch(self, batch) -> Iterator[TradeEvent]:
+    def _run_batch(self, batch: dict[str, torch.Tensor]) -> Iterator[TradeEvent]:
         features = batch["features"].to(self.device, non_blocking=True)
         sym = batch["symbol_id"].to(self.device, non_blocking=True)
         gran = batch["granularity_id"].to(self.device, non_blocking=True)

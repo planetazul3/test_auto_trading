@@ -18,7 +18,7 @@ Mejoras respecto a la versión previa:
 from __future__ import annotations
 
 import warnings
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence, cast
 
 import numpy as np
 import xgboost as xgb
@@ -37,7 +37,7 @@ DEFAULT_REGIME_LABELS: tuple[str, ...] = ("LOW_VOL", "TRENDING", "HIGH_VOL")
 
 
 def _normalize_shap_values(
-    raw, regime_idx: int, sample_idx: int
+    raw: Any, regime_idx: int, sample_idx: int
 ) -> np.ndarray:
     """Devuelve el vector SHAP ``(num_features,)`` para una muestra y clase.
 
@@ -46,13 +46,16 @@ def _normalize_shap_values(
     * SHAP ≥0.42: ``ndarray (n, f, k)``.
     """
     if isinstance(raw, list):
-        return np.asarray(raw[regime_idx][sample_idx], dtype=np.float64)
-    arr = np.asarray(raw, dtype=np.float64)
+        out: np.ndarray = np.asarray(raw[regime_idx][sample_idx], dtype=np.float64)
+        return out
+    arr: np.ndarray = np.asarray(raw, dtype=np.float64)
     if arr.ndim == 3:
-        return arr[sample_idx, :, regime_idx]
+        slc: np.ndarray = arr[sample_idx, :, regime_idx]
+        return slc
     if arr.ndim == 2:
         # Modelo binario: una única matriz (n, f).
-        return arr[sample_idx]
+        row: np.ndarray = arr[sample_idx]
+        return row
     raise ValueError(f"unsupported SHAP value shape: {arr.shape}")
 
 
@@ -120,9 +123,10 @@ class RegimeAwareMetaLearner:
         if self.class_weight is None:
             return None
         if self.class_weight == "balanced":
-            return compute_sample_weight("balanced", y)
+            return cast(np.ndarray, compute_sample_weight("balanced", y))
         if isinstance(self.class_weight, dict):
-            return np.array([float(self.class_weight[int(c)]) for c in y])
+            weights: np.ndarray = np.array([float(self.class_weight[int(c)]) for c in y])
+            return weights
         raise ValueError(
             "class_weight must be None, 'balanced' or a dict[int, float]"
         )
@@ -182,12 +186,12 @@ class RegimeAwareMetaLearner:
     def predict_regime_probs(self, X: np.ndarray) -> np.ndarray:
         if not self.is_fitted:
             raise RuntimeError("Model not fitted; call .fit() first")
-        return self.model.predict_proba(np.asarray(X))
+        return cast(np.ndarray, self.model.predict_proba(np.asarray(X)))
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         if not self.is_fitted:
             raise RuntimeError("Model not fitted; call .fit() first")
-        return self.model.predict(np.asarray(X))
+        return cast(np.ndarray, self.model.predict(np.asarray(X)))
 
     # ------------------------------------------------------------------
     # Importancia / explicabilidad

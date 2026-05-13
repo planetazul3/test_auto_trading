@@ -23,7 +23,7 @@ Diseño:
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -193,9 +193,10 @@ class PerContractCalibratorBundle:
             cal.is_fitted = True
 
 
-def _to_numpy(x) -> np.ndarray:
+def _to_numpy(x: Any) -> np.ndarray:
     if isinstance(x, torch.Tensor):
-        return x.detach().cpu().numpy()
+        out: np.ndarray = x.detach().cpu().numpy()
+        return out
     return np.asarray(x)
 
 
