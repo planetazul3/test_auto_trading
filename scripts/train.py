@@ -94,39 +94,47 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--granularity", type=int, default=60,
         help="segundos; 0 = ticks (ignorado si --kind ticks)",
     )
-    p.add_argument("--window-size", type=int, default=60)
-    p.add_argument("--stride", type=int, default=1)
-    p.add_argument("--horizons", type=int, nargs="+", default=[1, 3, 5, 10])
     p.add_argument(
-        "--contracts", type=str, nargs="+",
-        default=["CALLPUT", "HIGHERLOWER"],
+        "--config", type=str, default=None,
+        help="ruta a YAML/JSON con TrainingConfig; CLI flags explícitos sobreescriben",
+    )
+    p.add_argument(
+        "--resume", type=str, default=None,
+        help="reanuda desde un checkpoint .pt; restaura model/optimizer/scheduler/state",
+    )
+
+    p.add_argument("--window-size", type=int, default=None)
+    p.add_argument("--stride", type=int, default=None)
+    p.add_argument("--horizons", type=int, nargs="+", default=None)
+    p.add_argument(
+        "--contracts", type=str, nargs="+", default=None,
         help="lista de contratos a entrenar como cabezales",
     )
 
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--grad-accum", type=int, default=1)
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--lr", type=float, default=None)
+    p.add_argument("--weight-decay", type=float, default=None)
+    p.add_argument("--grad-clip", type=float, default=None)
+    p.add_argument("--grad-accum", type=int, default=None)
 
-    p.add_argument("--val-fraction", type=float, default=0.15)
-    p.add_argument("--test-fraction", type=float, default=0.15)
+    p.add_argument("--val-fraction", type=float, default=None)
+    p.add_argument("--test-fraction", type=float, default=None)
 
-    p.add_argument("--embedding-dim", type=int, default=64)
-    p.add_argument("--lstm-hidden", type=int, default=64)
-    p.add_argument("--num-heads", type=int, default=4)
-    p.add_argument("--cnn-channels", type=int, nargs="+", default=[64, 128])
-    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--embedding-dim", type=int, default=None)
+    p.add_argument("--lstm-hidden", type=int, default=None)
+    p.add_argument("--num-heads", type=int, default=None)
+    p.add_argument("--cnn-channels", type=int, nargs="+", default=None)
+    p.add_argument("--dropout", type=float, default=None)
 
     p.add_argument(
         "--device-strategy", type=str, choices=("auto", "cpu", "single_gpu", "ddp"),
-        default="auto",
+        default=None,
     )
-    p.add_argument("--precision", type=str, choices=("fp32", "fp16", "bf16"), default="fp32")
+    p.add_argument("--precision", type=str, choices=("fp32", "fp16", "bf16"), default=None)
     p.add_argument("--world-size", type=int, default=1, help="usado sólo en DDP")
-    p.add_argument("--ddp-backend", type=str, default="nccl")
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--ddp-backend", type=str, default=None)
+    p.add_argument("--seed", type=int, default=None)
 
     p.add_argument("--checkpoint-dir", type=str, default=None)
     p.add_argument("--early-stopping-patience", type=int, default=None)
@@ -136,6 +144,32 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="construye datasets/modelo y reporta sin entrenar (smoke)",
     )
     return p
+
+
+# Defaults used when neither --config nor an explicit CLI flag provides a value.
+_CLI_DEFAULTS: dict = {
+    "window_size": 60,
+    "stride": 1,
+    "horizons": [1, 3, 5, 10],
+    "contracts": ["CALLPUT", "HIGHERLOWER"],
+    "epochs": 10,
+    "batch_size": 64,
+    "lr": 3e-4,
+    "weight_decay": 1e-4,
+    "grad_clip": 1.0,
+    "grad_accum": 1,
+    "val_fraction": 0.15,
+    "test_fraction": 0.15,
+    "embedding_dim": 64,
+    "lstm_hidden": 64,
+    "num_heads": 4,
+    "cnn_channels": [64, 128],
+    "dropout": 0.1,
+    "device_strategy": "auto",
+    "precision": "fp32",
+    "ddp_backend": "nccl",
+    "seed": 42,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +184,7 @@ def build_datasets(
 ) -> tuple[Dataset, Optional[Dataset], Optional[Dataset], list[str]]:
     """Devuelve ``(train_ds, val_ds, test_ds, feature_names)``."""
     store = DuckDBStore(args.db, read_only=True)
-    label_specs = tuple(LabelSpec(c) for c in args.contracts)
+    label_specs = tuple(LabelSpec(c) for c in data_cfg.contracts)
     win_cfg = WindowDatasetConfig(
         window_size=data_cfg.window_size,
         stride=data_cfg.stride,
@@ -248,8 +282,8 @@ def _run_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
         train_ds, val_ds, _test_ds, feature_names = build_datasets(args, embedding, cfg.data)
 
         head_cfg = HeadConfig(
-            contracts=tuple(args.contracts),
-            horizons=tuple(args.horizons),
+            contracts=cfg.data.contracts,
+            horizons=cfg.data.horizons,
             use_context=cfg.model.use_asset_timeframe_context,
             dropout=cfg.model.dropout,
         )
@@ -266,7 +300,7 @@ def _run_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             log.info("config:\n%s", cfg.to_json())
 
         loss = MultiContractLoss(
-            contracts=tuple(args.contracts), horizons=tuple(args.horizons)
+            contracts=cfg.data.contracts, horizons=cfg.data.horizons
         )
 
         train_sampler = val_sampler = None
@@ -298,6 +332,13 @@ def _run_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             forward_fn=_forward_fn,
             collate_fn=collate_window_samples,
         )
+        if args.resume:
+            trainer.load_checkpoint(args.resume)
+            if is_main_process():
+                log.info(
+                    "resumed from %s (next epoch=%d, best_val_loss=%.6f)",
+                    args.resume, trainer.state.epoch, trainer.state.best_val_loss,
+                )
         state = trainer.fit()
 
         if is_main_process():
@@ -306,7 +347,7 @@ def _run_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
             # Calibrar bundle sobre el val set.
             if val_ds is not None:
                 bundle = _calibrate_bundle(
-                    trainer, val_ds, args.contracts, args.horizons,
+                    trainer, val_ds, cfg.data.contracts, cfg.data.horizons,
                     cfg, embedding, feature_names,
                 )
                 report = bundle.quality_report()
@@ -318,46 +359,122 @@ def _run_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
         shutdown_distributed()
 
 
+def _pick(cli_value, base_value, default):
+    """Resolve a single field: explicit CLI > loaded-config > hardcoded default."""
+    if cli_value is not None:
+        return cli_value
+    if base_value is not None:
+        return base_value
+    return default
+
+
 def _assemble_config(args: argparse.Namespace) -> TrainingConfig:
-    head = HeadConfig(
-        contracts=tuple(args.contracts),
-        horizons=tuple(args.horizons),
-        use_context=True,
-        dropout=args.dropout,
+    """Build a TrainingConfig from the layered sources.
+
+    Precedence (highest first): explicit CLI flag → ``--config`` file →
+    ``_CLI_DEFAULTS``. Fields not exposed via CLI come from the file when
+    present, else the dataclass default.
+    """
+    base: Optional[TrainingConfig] = (
+        TrainingConfig.from_file(args.config) if args.config else None
     )
+    base_model = base.model if base else None
+    base_data = base.data if base else None
+    base_opt = base.optimizer if base else None
+    base_dev = base.device if base else None
+
+    def m(field: str, default):  # model
+        return _pick(None, getattr(base_model, field, None), default) if base_model else default
+
+    def d(field: str, default):  # data
+        return _pick(None, getattr(base_data, field, None), default) if base_data else default
+
+    def o(field: str, default):  # optimizer
+        return _pick(None, getattr(base_opt, field, None), default) if base_opt else default
+
+    def v(field: str, default):  # device
+        return _pick(None, getattr(base_dev, field, None), default) if base_dev else default
+
+    contracts = tuple(
+        _pick(args.contracts, base_data.contracts if base_data else None, _CLI_DEFAULTS["contracts"])
+    )
+    horizons = tuple(
+        _pick(args.horizons, base_data.horizons if base_data else None, _CLI_DEFAULTS["horizons"])
+    )
+    dropout = _pick(args.dropout, base_model.dropout if base_model else None, _CLI_DEFAULTS["dropout"])
+    cnn_channels = tuple(
+        _pick(args.cnn_channels, base_model.cnn_channels if base_model else None, _CLI_DEFAULTS["cnn_channels"])
+    )
+
+    head = HeadConfig(
+        contracts=contracts,
+        horizons=horizons,
+        use_context=m("use_asset_timeframe_context", True),
+        dropout=dropout,
+    )
+
+    model_cfg = ModelConfig(
+        embedding_dim=_pick(args.embedding_dim, base_model.embedding_dim if base_model else None, _CLI_DEFAULTS["embedding_dim"]),
+        lstm_hidden=_pick(args.lstm_hidden, base_model.lstm_hidden if base_model else None, _CLI_DEFAULTS["lstm_hidden"]),
+        lstm_layers=m("lstm_layers", ModelConfig.__dataclass_fields__["lstm_layers"].default),
+        num_attention_heads=_pick(args.num_heads, base_model.num_attention_heads if base_model else None, _CLI_DEFAULTS["num_heads"]),
+        cnn_channels=cnn_channels,
+        cnn_kernel_sizes=tuple(m("cnn_kernel_sizes", (3, 3))),
+        cnn_dilations=tuple(m("cnn_dilations", (1, 2))),
+        dropout=dropout,
+        head=head,
+        use_asset_timeframe_context=m("use_asset_timeframe_context", True),
+        asset_timeframe_embedding_dim=m("asset_timeframe_embedding_dim", 32),
+    )
+
+    feature_builder = base_data.feature_builder if base_data else DataConfig.__dataclass_fields__["feature_builder"].default_factory()
+    data_cfg = DataConfig(
+        window_size=_pick(args.window_size, base_data.window_size if base_data else None, _CLI_DEFAULTS["window_size"]),
+        stride=_pick(args.stride, base_data.stride if base_data else None, _CLI_DEFAULTS["stride"]),
+        horizons=horizons,
+        contracts=contracts,
+        val_fraction=_pick(args.val_fraction, base_data.val_fraction if base_data else None, _CLI_DEFAULTS["val_fraction"]),
+        test_fraction=_pick(args.test_fraction, base_data.test_fraction if base_data else None, _CLI_DEFAULTS["test_fraction"]),
+        purge=d("purge", 0),
+        embargo=d("embargo", 0),
+        batch_size=_pick(args.batch_size, base_data.batch_size if base_data else None, _CLI_DEFAULTS["batch_size"]),
+        num_workers=d("num_workers", 0),
+        pin_memory=d("pin_memory", False),
+        feature_builder=feature_builder,
+    )
+
+    optimizer_cfg = OptimizerConfig(
+        lr=_pick(args.lr, base_opt.lr if base_opt else None, _CLI_DEFAULTS["lr"]),
+        weight_decay=_pick(args.weight_decay, base_opt.weight_decay if base_opt else None, _CLI_DEFAULTS["weight_decay"]),
+        betas=tuple(o("betas", (0.9, 0.999))),
+        grad_clip_norm=_pick(args.grad_clip, base_opt.grad_clip_norm if base_opt else None, _CLI_DEFAULTS["grad_clip"]),
+        gradient_accumulation_steps=_pick(args.grad_accum, base_opt.gradient_accumulation_steps if base_opt else None, _CLI_DEFAULTS["grad_accum"]),
+        lr_scheduler=o("lr_scheduler", None),
+        warmup_steps=o("warmup_steps", 0),
+    )
+
+    device_cfg = DeviceConfig(
+        strategy=_pick(args.device_strategy, base_dev.strategy if base_dev else None, _CLI_DEFAULTS["device_strategy"]),
+        precision=_pick(args.precision, base_dev.precision if base_dev else None, _CLI_DEFAULTS["precision"]),
+        ddp_backend=_pick(args.ddp_backend, base_dev.ddp_backend if base_dev else None, _CLI_DEFAULTS["ddp_backend"]),
+        find_unused_parameters=v("find_unused_parameters", False),
+        seed=_pick(args.seed, base_dev.seed if base_dev else None, _CLI_DEFAULTS["seed"]),
+    )
+
     return TrainingConfig(
-        epochs=args.epochs,
-        model=ModelConfig(
-            embedding_dim=args.embedding_dim,
-            lstm_hidden=args.lstm_hidden,
-            num_attention_heads=args.num_heads,
-            cnn_channels=tuple(args.cnn_channels),
-            dropout=args.dropout,
-            head=head,
+        epochs=_pick(args.epochs, base.epochs if base else None, _CLI_DEFAULTS["epochs"]),
+        model=model_cfg,
+        data=data_cfg,
+        optimizer=optimizer_cfg,
+        device=device_cfg,
+        checkpoint_dir=_pick(args.checkpoint_dir, base.checkpoint_dir if base else None, None),
+        checkpoint_every_n_epochs=base.checkpoint_every_n_epochs if base else 1,
+        early_stopping_patience=_pick(
+            args.early_stopping_patience,
+            base.early_stopping_patience if base else None,
+            None,
         ),
-        data=DataConfig(
-            window_size=args.window_size,
-            stride=args.stride,
-            horizons=tuple(args.horizons),
-            contracts=tuple(args.contracts),
-            val_fraction=args.val_fraction,
-            test_fraction=args.test_fraction,
-            batch_size=args.batch_size,
-        ),
-        optimizer=OptimizerConfig(
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            grad_clip_norm=args.grad_clip,
-            gradient_accumulation_steps=args.grad_accum,
-        ),
-        device=DeviceConfig(
-            strategy=args.device_strategy,
-            precision=args.precision,
-            ddp_backend=args.ddp_backend,
-            seed=args.seed,
-        ),
-        checkpoint_dir=args.checkpoint_dir,
-        early_stopping_patience=args.early_stopping_patience,
+        log_every_n_steps=base.log_every_n_steps if base else 50,
     )
 
 
@@ -410,7 +527,10 @@ def _save_bundle(bundle: PerContractCalibratorBundle, path: Path) -> None:
 def main(argv=None) -> int:
     args = _build_argparser().parse_args(argv)
 
-    strategy = detect_device_strategy(args.device_strategy)
+    # Resolver la estrategia de device antes de spawn: CLI > config > "auto".
+    cfg_preview = TrainingConfig.from_file(args.config) if args.config else None
+    raw_strategy = args.device_strategy or (cfg_preview.device.strategy if cfg_preview else "auto")
+    strategy = detect_device_strategy(raw_strategy)
     world_size = args.world_size if strategy == "ddp" else 1
 
     if world_size > 1:

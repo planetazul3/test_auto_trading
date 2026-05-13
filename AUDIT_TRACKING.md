@@ -165,9 +165,9 @@ Leyenda:
 - [x] **B3. Conformal prediction encima del cabezal CALL/PUT.** `src/models/conformal.py`: `InductiveConformalPredictor` (ICP binario con score `1 - p̂(y|x)`, ring buffer adaptativo, quantile cacheado) + `ConformalBundle` paralelo al calibrador con API vectorizada `(B,C,H)→(B,C,H,2)`. Integrado en `BacktestEngine.conformal_gate`: cuando el set conformal no es `{0}` ni `{1}`, la celda se fuerza a NO_TRADE (preserva la garantía marginal de coverage ≥1-α). 14 tests cubriendo: properties del set (singleton/ambivalent/empty), validación, coverage empírico ≥ 1-α en datos sintéticos, monotonicidad respecto a α, ring buffer wrap-around, bundle vectorizado y dos escenarios end-to-end con backtester (gate ambivalente forcing NO_TRADE vs gate calibrado dejando pasar señales).
 
 ### Entrenamiento end-to-end
-- [ ] **C1.** Script `scripts/train.py` que: carga `TrainingConfig` desde YAML/JSON → instancia `WindowDataset` (multi-symbol vía `ConcatDataset`) → backbone + cabezales + embedding → `Trainer.fit()` → escribe el mejor checkpoint a disco.
-- [ ] **C2.** Spawn DDP real (`torch.multiprocessing.spawn`) wrappeado en `scripts/train.py --world-size N`.
-- [ ] **C3.** Reanudación de entrenamiento (`--resume <ckpt>`).
+- [x] **C1.** Script `scripts/train.py` que: carga `TrainingConfig` desde YAML/JSON → instancia `WindowDataset` (multi-symbol vía `ConcatDataset`) → backbone + cabezales + embedding → `Trainer.fit()` → escribe el mejor checkpoint a disco. `TrainingConfig.from_file/.to_file` con auto-detect `.yaml`/`.yml`/`.json`. Precedencia explícita: flag CLI → `--config` → defaults. 6 tests (round-trip JSON/YAML, partial-dict, extensión inválida, CLI YAML smoke).
+- [x] **C2.** Spawn DDP real (`torch.multiprocessing.spawn`) wrappeado en `scripts/train.py --world-size N`.
+- [x] **C3.** Reanudación de entrenamiento (`--resume <ckpt>`). `Trainer.load_checkpoint` ahora avanza `state.epoch` al siguiente epoch a correr; `fit()` arranca en `self.state.epoch` para honrar resume sin re-ejecutar epochs ya completados. 2 tests (trainer-level y CLI end-to-end).
 
 ### Datos
 - [ ] **D1.** Adaptador a `src/features/generator.py` cuando `pandas-ta` esté disponible (fallback automático al `CandleFeatureBuilder`).

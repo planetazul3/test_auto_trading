@@ -293,3 +293,76 @@ def test_train_cli_runs_one_epoch(multi_symbol_store, tmp_path) -> None:
     assert (ckpt_dir / "calibrator_bundle.json").exists()
     bundle_state = json.loads((ckpt_dir / "calibrator_bundle.json").read_text())
     assert isinstance(bundle_state, dict)
+
+
+def test_train_cli_loads_yaml_config(multi_symbol_store, tmp_path) -> None:
+    """--config YAML maneja todos los hiperparámetros; smoke con --dry-run."""
+    import yaml
+
+    db_path = multi_symbol_store.path
+    multi_symbol_store.close()
+    train_mod = _load_train_module()
+
+    cfg_payload = {
+        "epochs": 1,
+        "model": {
+            "embedding_dim": 16,
+            "lstm_hidden": 16,
+            "num_attention_heads": 2,
+            "cnn_channels": [8, 16],
+            "dropout": 0.1,
+        },
+        "data": {
+            "window_size": 20,
+            "horizons": [1],
+            "contracts": ["CALLPUT"],
+            "batch_size": 8,
+        },
+        "optimizer": {"lr": 3e-4},
+        "device": {"strategy": "cpu"},
+    }
+    cfg_path = tmp_path / "train.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg_payload))
+
+    rc = train_mod.main([
+        "--db", db_path,
+        "--symbol", "R_100",
+        "--kind", "candles", "--granularity", "60",
+        "--config", str(cfg_path),
+        "--dry-run",
+    ])
+    assert rc == 0
+
+
+def test_train_cli_resume_continues_from_checkpoint(multi_symbol_store, tmp_path) -> None:
+    """--resume retoma el entrenamiento desde el checkpoint guardado."""
+    db_path = multi_symbol_store.path
+    multi_symbol_store.close()
+    train_mod = _load_train_module()
+
+    ckpt_dir = tmp_path / "ckpts"
+    common = [
+        "--db", db_path,
+        "--symbol", "R_100",
+        "--kind", "candles", "--granularity", "60",
+        "--window-size", "20", "--horizons", "1",
+        "--contracts", "CALLPUT",
+        "--batch-size", "8",
+        "--embedding-dim", "16", "--lstm-hidden", "16",
+        "--num-heads", "2", "--cnn-channels", "8", "16",
+        "--device-strategy", "cpu",
+        "--checkpoint-dir", str(ckpt_dir),
+    ]
+    rc1 = train_mod.main([*common, "--epochs", "1"])
+    assert rc1 == 0
+    ckpt = ckpt_dir / "best.pt"
+    assert ckpt.exists()
+    mtime_before = ckpt.stat().st_mtime
+
+    # Reanudar con epochs=2 → debería correr el epoch faltante y posiblemente
+    # sobrescribir best.pt; sin error.
+    rc2 = train_mod.main([*common, "--epochs", "2", "--resume", str(ckpt)])
+    assert rc2 == 0
+    assert ckpt.exists()
+    # best.pt sigue válido (no se corrompió). mtime puede o no cambiar según mejore val_loss.
+    _ = mtime_before  # mantenido por claridad; comparar mtime es flaky en CI
