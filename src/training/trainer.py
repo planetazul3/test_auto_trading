@@ -305,7 +305,8 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def fit(self) -> TrainState:
-        for epoch in range(self.config.epochs):
+        start_epoch = self.state.epoch
+        for epoch in range(start_epoch, self.config.epochs):
             self.state.epoch = epoch
             train_metrics = self.train_one_epoch(epoch)
             val_metrics = self.validate()
@@ -364,7 +365,9 @@ class Trainer:
         if payload.get("scheduler") and self.scheduler is not None:
             self.scheduler.load_state_dict(payload["scheduler"])
         st = payload.get("state", {})
-        self.state.epoch = int(st.get("epoch", 0))
+        # state.epoch in the checkpoint is the last *completed* epoch index;
+        # set self.state.epoch to the next one so fit() resumes past it.
+        self.state.epoch = int(st.get("epoch", -1)) + 1
         self.state.global_step = int(st.get("global_step", 0))
         self.state.best_val_loss = float(st.get("best_val_loss", math.inf))
 

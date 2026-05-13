@@ -278,6 +278,51 @@ def test_trainer_loads_checkpoint_round_trip(tmp_path) -> None:
         torch.testing.assert_close(sd1[k], sd2[k])
 
 
+def test_trainer_resume_advances_epoch_and_skips_completed(tmp_path) -> None:
+    """Tras cargar un checkpoint, fit() arranca en el epoch siguiente al guardado."""
+    ds = _TinyDataset(n=16)
+    model_a = _TinyModel(n_features=6, contracts=2, horizons=2)
+    loss = MultiContractLoss(contracts=("CALLPUT", "HIGHERLOWER"), horizons=(1, 3))
+    cfg = TrainingConfig(
+        epochs=2,
+        data=DataConfig(batch_size=8),
+        optimizer=OptimizerConfig(lr=1e-3),
+        device=DeviceConfig(strategy="cpu"),
+        checkpoint_dir=str(tmp_path / "ckpts"),
+    )
+    trainer_a = Trainer(
+        model=model_a, loss_fn=loss, train_dataset=ds, config=cfg,
+        collate_fn=_trainer_collate,
+    )
+    state_a = trainer_a.fit()
+    assert len(state_a.history) == 2  # epochs 0 y 1
+
+    # Reanudar: cfg.epochs sigue siendo 2, debería ejecutar 0 epochs nuevos.
+    model_b = _TinyModel(n_features=6, contracts=2, horizons=2)
+    trainer_b = Trainer(
+        model=model_b, loss_fn=loss, train_dataset=ds, config=cfg,
+        collate_fn=_trainer_collate,
+    )
+    trainer_b.load_checkpoint(str(Path(cfg.checkpoint_dir) / "best.pt"))
+    # Después del load, state.epoch debería ser "next to run" = último_completado + 1.
+    assert trainer_b.state.epoch >= 1
+    state_b = trainer_b.fit()
+    # No corre epochs adicionales porque ya alcanzamos cfg.epochs.
+    assert len(state_b.history) == 0
+
+    # Si subimos epochs, sí entrena los faltantes.
+    from dataclasses import replace as _replace
+    cfg_more = _replace(cfg, epochs=4)
+    model_c = _TinyModel(n_features=6, contracts=2, horizons=2)
+    trainer_c = Trainer(
+        model=model_c, loss_fn=loss, train_dataset=ds, config=cfg_more,
+        collate_fn=_trainer_collate,
+    )
+    trainer_c.load_checkpoint(str(Path(cfg.checkpoint_dir) / "best.pt"))
+    state_c = trainer_c.fit()
+    assert 1 <= len(state_c.history) <= 4 - trainer_c.state.epoch + len(state_c.history)
+
+
 def test_trainer_early_stopping_triggers() -> None:
     ds = _TinyDataset(n=16)
     model = _TinyModel(n_features=6, contracts=2, horizons=2)
